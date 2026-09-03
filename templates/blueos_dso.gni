@@ -1,0 +1,67 @@
+# Copyright (c) 2026 vivo Mobile Communication Co., Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("//build/config/artifact_profiles.gni")
+import("//build/templates/rust.gni")
+
+# Build a PIC shared object (ET_DYN, `-shared`) with a SONAME and gate its ELF
+# contract.
+#
+# The DSO is the system shared library (`libc.so.1` in C19). The profile pins
+# PIC codegen and the hardened DSO flags (`-z relro -z now -z noexecstack
+# -z text`); the SONAME is a required contract (see `check_blueos_elf.py`).
+#
+# Produces two targets:
+#   :<name>        the linked `lib/lib<crate_name>.so`
+#   :<name>_check  runs the ELF contract gate (depends on :<name>)
+template("blueos_dso") {
+  assert(defined(invoker.sources), "blueos_dso requires `sources`")
+
+  _name = target_name
+
+  _crate_name = _name
+  if (defined(invoker.crate_name)) {
+    _crate_name = invoker.crate_name
+  }
+
+  _soname = "lib${_crate_name}.so"
+  if (defined(invoker.soname)) {
+    _soname = invoker.soname
+  }
+
+  build_rust(_name) {
+    forward_variables_from(invoker, "*", [ "rustflags" ])
+    crate_type = "cdylib"
+    rustflags = dso_rustflags + [ "-Clink-arg=-soname=${_soname}" ]
+    if (defined(invoker.rustflags)) {
+      rustflags += invoker.rustflags
+    }
+  }
+
+  _out_dir = get_label_info(":${_name}", "root_out_dir")
+  _elf = "${_out_dir}/lib/lib${_crate_name}.so"
+
+  action("${_name}_check") {
+    forward_variables_from(invoker, [ "testonly" ])
+    script = "//build/scripts/check_blueos_elf.py"
+    inputs = [ _elf ]
+    deps = [ ":${_name}" ]
+    args = [
+      "--profile",
+      "dso",
+      rebase_path(_elf),
+    ]
+    outputs = [ "${target_gen_dir}/${_name}_check.stamp" ]
+  }
+}

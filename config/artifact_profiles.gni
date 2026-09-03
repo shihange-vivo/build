@@ -1,0 +1,71 @@
+# Copyright (c) 2026 vivo Mobile Communication Co., Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Phase-1 artifact link policies (C18).
+#
+# The rustc target specs (`thumbv7m-vivo-blueos-newlibeabi`, etc.) now default
+# to PIC + dynamic linking. Each of the three policies below pins the
+# per-artifact relocation and link contract on top of that default:
+#
+#   * kernel_static — fixed-address `ET_EXEC`. The kernel is never relocated by
+#     the loader; its PIC sysroot rlibs are compiled once and their relative
+#     relocations are absorbed by the linker at link time. This is the profile
+#     the board `kernel_config` already applies.
+#   * dynamic_app  — PIC/PIE `ET_DYN`, relocated by the kernel loader against a
+#     `libc.so.1` dependency. Forbids `-static` / `-z norelro`.
+#   * dso          — PIC `ET_DYN` shared object with a SONAME, linked `-shared`.
+#
+# Link-argument spelling depends on the linker the artifact actually uses:
+#
+#   * `kernel_static` and `dynamic_app` are `bin` artifacts, so the `rust_bin`
+#     tool drives the link and injects `-Wl,-Map=...` — a cc-driver convention.
+#     They must therefore spell linker options as `-Clink-arg=-Wl,...` and link
+#     through a cc driver (`-Clinker=arm-none-eabi-gcc` / `-Clinker=clang
+#     -Clink-arg=-fuse-ld=lld`), which the board config supplies. This is why
+#     `dynamic_app` uses `-Wl,-z,relro` (not `-zrelro`).
+#   * `dso` is a `cdylib` artifact, so its tool does not inject `-Wl,-Map=` and
+#     links through the target spec's bare rust-lld (`linker_flavor =
+#     Gnu(No, Yes)`), which rejects `-Wl,`. It uses the bare `-zrelro` spelling.
+#
+# The `-Clinker`/`--target`/`-march`/float selection is board ABI config (board
+# `kernel_config`/`app_config`), not artifact policy — see
+# `book/src/dynamic-loading-phase1-implementation.md` §7's three-layer split.
+
+kernel_static_rustflags = [
+  "-Crelocation-model=static",
+  "-Cpanic=abort",
+  "-Clink-arg=-static",
+  "-Clink-arg=--no-pie",
+]
+
+dynamic_app_rustflags = [
+  "-Crelocation-model=pic",
+  "-Cpanic=abort",
+  "-Clink-arg=-Wl,-pie",
+  "-Clink-arg=-Wl,--no-dynamic-linker",
+  "-Clink-arg=-Wl,-z,relro",
+  "-Clink-arg=-Wl,-z,now",
+  "-Clink-arg=-Wl,-z,noexecstack",
+  "-Clink-arg=-Wl,-z,text",
+  "-Clink-arg=-Wl,--build-id",
+]
+
+dso_rustflags = [
+  "-Crelocation-model=pic",
+  "-Cpanic=abort",
+  "-Clink-arg=-zrelro",
+  "-Clink-arg=-znow",
+  "-Clink-arg=-znoexecstack",
+  "-Clink-arg=-ztext",
+]

@@ -1,0 +1,57 @@
+# Copyright (c) 2026 vivo Mobile Communication Co., Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("//build/config/artifact_profiles.gni")
+import("//build/templates/rust.gni")
+
+# Build a PIC/PIE dynamic application (ET_DYN) and gate its ELF contract.
+#
+# The image is relocated by the kernel loader against a `libc.so.1` dependency:
+# it must carry PT_DYNAMIC + DT_NEEDED, must be PIE (DF_1_PIE), and must not
+# carry PT_INTERP / `-static` / `-z norelro` (see `check_blueos_elf.py`). The
+# caller supplies the `libc.so.1` import (C19) through `deps`/`libs`.
+#
+# Produces two targets:
+#   :<name>        the linked `bin/<name>` (ET_DYN PIE)
+#   :<name>_check  runs the ELF contract gate (depends on :<name>)
+template("dynamic_app") {
+  assert(defined(invoker.sources), "dynamic_app requires `sources`")
+
+  _name = target_name
+
+  build_rust(_name) {
+    forward_variables_from(invoker, "*", [ "rustflags" ])
+    crate_type = "bin"
+    rustflags = dynamic_app_rustflags
+    if (defined(invoker.rustflags)) {
+      rustflags += invoker.rustflags
+    }
+  }
+
+  _out_dir = get_label_info(":${_name}", "root_out_dir")
+  _elf = "${_out_dir}/bin/${_name}"
+
+  action("${_name}_check") {
+    forward_variables_from(invoker, [ "testonly" ])
+    script = "//build/scripts/check_blueos_elf.py"
+    inputs = [ _elf ]
+    deps = [ ":${_name}" ]
+    args = [
+      "--profile",
+      "dynamic_app",
+      rebase_path(_elf),
+    ]
+    outputs = [ "${target_gen_dir}/${_name}_check.stamp" ]
+  }
+}

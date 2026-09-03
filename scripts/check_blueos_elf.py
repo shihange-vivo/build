@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Copyright (c) 2026 vivo Mobile Communication Co., Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Validate a BlueOS artifact against its ELF contract (Phase 1, C18).
+
+This is the build-time gate for the three artifact link policies introduced in
+`build/config/artifact_profiles.gni`:
+
+  * `kernel_static` — PIC codegen, fully static link (ET_EXEC). Forbids an
+    interpreter, a dynamic section, DT_NEEDED, text relocations, and any
+    relocation that still needs runtime processing.
+  * `dynamic_app` — PIC/PIE dynamic application (ET_DYN). Requires PT_DYNAMIC
+    and a DT_NEEDED dependency; forbids PT_INTERP, `-static`, and `-z norelro`.
+  * `dso` — PIC shared object (ET_DYN). Requires DT_SONAME and forbids an
+    interpreter.
+
+All profiles share the ARM32 soft-float Thumb ABI contract (ELFCLASS32 +
+EM_ARM + Thumb-only + soft-float EABI) and, for dynamic artifacts, a
+first-class relocation whitelist (`R_ARM_RELATIVE`/`R_ARM_ABS32`/
+`R_ARM_GLOB_DAT`/`R_ARM_JUMP_SLOT`).
+
+The script shells out to `llvm-readelf` (override with `LLVM_READELF`). It
+reads only ELF metadata; it never executes the artifact.
+"""
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+
+# e_flags bits (ARM EABI). See the ARM ELF ABI spec, EF_ARM_*.
+_EF_ARM_ABI_FLOAT_MASK = 0x600
+_EF_ARM_ABI_FLOAT_SOFT = 0x200
+_EF_ARM_EABIMASK = 0xFF000000
+_EF_ARM_EABI_VER5 = 0x05000000
+
+# Phase-1 first-class relocation set (plan §13.3). Anything outside this set
+# fails the dynamic artifact gate.
+_ALLOWED_RELOCS = frozenset({
+    "R_ARM_RELATIVE",
+    "R_ARM_ABS32",
+    "R_ARM_GLOB_DAT",
+    "R_ARM_JUMP_SLOT",
+})
+
+# Text (instruction) relocations that must never reach a dynamic image; they
+# indicate a non-PIC call/absolute access that the loader cannot relocate
+# safely (plan §7 "PltGotOnly").
+_TEXT_RELOCS = frozenset({
+    "R_ARM_CALL",
+    "R_ARM_JUMP24",
+    "R_ARM_THM_CALL",
+    "R_ARM_THM_JUMP24",
+    "R_ARM_PREL31",
+    "R_ARM_MOVW_ABS_NC",
+    "R_ARM_MOVT_ABS",
+    "R_ARM_THM_MOVW_ABS_NC",
+    "R_ARM_THM_MOVT_ABS",
+})
+
+_PROFILES = ("kernel_static", "dynamic_app", "dso")
+
+
+class ElfError(Exception):
+    """A contract violation, raised with a human-readable reason."""
+
+
+def _run(llvm_readelf, *args):
+    """Run llvm-readelf and return its stdout as text, or raise ElfError."""
+    cmd = [llvm_readelf, *args]
+    try:
+        proc = subprocess.run(cmd,
+                              capture_output=True,
+                              text=True,
+                              check=False)
+    except FileNotFoundError:
+        raise ElfError(f"llvm-readelf not found: {llvm_readelf!r}") from None
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip()
+        raise ElfError(f"`{' '.join(cmd)}` failed: {detail}")
+    return proc.stdout
+
+
+def _parse_header(text):
+    """Extract class/machine/type/flags/entry from `llvm-readelf -h`."""
+    class_ = re.search(r"Class:\s+(\S+)", text)
+    machine = re.search(r"Machine:\s+(\S+)", text)
+    elftype = re.search(r"Type:\s+(\S+)", text)
+    flags = re.search(r"Flags:\s+(0x[0-9A-Fa-f]+)", text)
+    entry = re.search(r"Entry point address:\s+(0x[0-9A-Fa-f]+)", text)
+    if not (class_ and machine and elftype and flags and entry):
+        raise ElfError("unable to parse ELF header from `llvm-readelf -h`")
+    return {
+        "class": class_.group(1),
+        "machine": machine.group(1),
+        "type": elftype.group(1),
+        "flags": int(flags.group(1), 16),
+        "entry": int(entry.group(1), 16),
+    }
+
+
+def _program_header_types(text):
+    """Return the set of PT_* types from `llvm-readelf -l`."""
+    types = set()
+    # The segment table lists each segment on one line, type first.
+    for match in re.finditer(r"^\s{2}(\S+)\s+0x[0-9A-Fa-f]+", text, re.M):
+        types.add(match.group(1))
+    return types
+
+
+def _dynamic_tags(text):
+    """Map dynamic tag name -> set of string values from `llvm-readelf -d`."""
+    tags = {}
+    for match in re.finditer(r"\((NEEDED|SONAME|FLAGS|FLAGS_1|TEXTREL|RPATH|"
+                             r"RUNPATH)\)\s+(.*)", text):
+        name, value = match.group(1), match.group(2).strip()
+        tags.setdefault(name, set()).add(value)
+    return tags
+
+
+def _relocs(text):
+    """Return the set of relocation type names from `llvm-readelf -r`."""
+    return set(re.findall(r"\b(R_ARM_[A-Z0-9_]+)\b", text))
+
+
+def _attribute_description(text, tag_name):
+    """Read the `Description:` value following `TagName: <tag_name>`."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if re.search(rf"TagName:\s*{tag_name}\s*$", line):
+            for lookahead in lines[i + 1:i + 3]:
+                m = re.search(r"Description:\s*(.+)$", lookahead)
+                if m:
+                    return m.group(1).strip()
+    return None
+
+
+def _check_arm_abi(header, attr_text, profile, check_entry=True):
+    """Shared ARM32 soft-float Thumb contract.
+
+    `check_entry` gates the Thumb entry-address check: it applies to the
+    executable profiles (`kernel_static`, `dynamic_app`) but not to `dso`,
+    whose `e_entry` is conventionally 0 (shared objects have no entry point).
+    """
+    if header["class"] != "ELF32":
+        raise ElfError(f"{profile}: expected ELFCLASS32, got {header['class']}")
+    if header["machine"] != "ARM":
+        raise ElfError(f"{profile}: expected EM_ARM, got {header['machine']}")
+
+    flags = header["flags"]
+    if (flags & _EF_ARM_EABIMASK) != _EF_ARM_EABI_VER5:
+        raise ElfError(f"{profile}: expected EABI5 e_flags, got "
+                       f"0x{flags:08x}")
+    if (flags & _EF_ARM_ABI_FLOAT_MASK) != _EF_ARM_ABI_FLOAT_SOFT:
+        raise ElfError(f"{profile}: expected soft-float EABI, got e_flags "
+                       f"0x{flags:08x}")
+
+    # Thumb-only: the executable entry must be a Thumb address (bit 0 set) and,
+    # when the artifact carries .ARM.attributes, ARM instructions must be
+    # disallowed.
+    if check_entry and header["entry"] & 1 != 1:
+        raise ElfError(f"{profile}: entry 0x{header['entry']:x} is not a "
+                       f"Thumb address (bit 0 clear)")
+    arm_isa = _attribute_description(attr_text, "ARM_ISA_use")
+    if arm_isa is not None and arm_isa != "Not Permitted":
+        raise ElfError(f"{profile}: ARM_ISA_use is {arm_isa!r}, expected "
+                       f"Thumb-only (Not Permitted)")
+
+
+def _check_dynamic_relocs(profile, relocs):
+    """Enforce the relocation whitelist and reject text relocations."""
+    if not relocs:
+        return
+    text = relocs & _TEXT_RELOCS
+    if text:
+        raise ElfError(f"{profile}: text relocation(s) present: "
+                       f"{', '.join(sorted(text))}")
+    unknown = relocs - _ALLOWED_RELOCS
+    if unknown:
+        raise ElfError(f"{profile}: relocation(s) outside first-class "
+                       f"whitelist: {', '.join(sorted(unknown))}")
+
+
+def _check_kernel_static(llvm_readelf, elf):
+    header_text = _run(llvm_readelf, "-h", elf)
+    phdr_text = _run(llvm_readelf, "-l", elf)
+    dyn_text = _run(llvm_readelf, "-d", elf)
+    reloc_text = _run(llvm_readelf, "-r", elf)
+    attr_text = _run(llvm_readelf, "-A", elf)
+
+    header = _parse_header(header_text)
+    _check_arm_abi(header, attr_text, "kernel_static")
+
+    if header["type"] != "EXEC":
+        raise ElfError(f"kernel_static: expected ET_EXEC, got {header['type']}")
+    phdrs = _program_header_types(phdr_text)
+    if "INTERP" in phdrs:
+        raise ElfError("kernel_static: PT_INTERP present (must be static)")
+    if "DYNAMIC" in phdrs:
+        raise ElfError("kernel_static: PT_DYNAMIC present (must be static)")
+    if "TLS" in phdrs:
+        raise ElfError("kernel_static: PT_TLS present")
+
+    tags = _dynamic_tags(dyn_text)
+    if tags.get("NEEDED"):
+        raise ElfError("kernel_static: DT_NEEDED present (must be static)")
+    if "TEXTREL" in tags:
+        raise ElfError("kernel_static: DF_TEXTREL present")
+
+    # A fully static PIC link must leave no runtime relocation behind.
+    _check_dynamic_relocs("kernel_static", _relocs(reloc_text))
+
+
+def _check_dynamic_app(llvm_readelf, elf):
+    header_text = _run(llvm_readelf, "-h", elf)
+    phdr_text = _run(llvm_readelf, "-l", elf)
+    dyn_text = _run(llvm_readelf, "-d", elf)
+    reloc_text = _run(llvm_readelf, "-r", elf)
+    attr_text = _run(llvm_readelf, "-A", elf)
+
+    header = _parse_header(header_text)
+    _check_arm_abi(header, attr_text, "dynamic_app")
+
+    if header["type"] != "DYN":
+        raise ElfError(f"dynamic_app: expected ET_DYN, got {header['type']}")
+    phdrs = _program_header_types(phdr_text)
+    if "INTERP" in phdrs:
+        raise ElfError("dynamic_app: PT_INTERP present (no dynamic linker)")
+    if "DYNAMIC" not in phdrs:
+        raise ElfError("dynamic_app: PT_DYNAMIC missing")
+
+    tags = _dynamic_tags(dyn_text)
+    if not tags.get("NEEDED"):
+        raise ElfError("dynamic_app: DT_NEEDED missing (must link libc.so)")
+    flags1 = tags.get("FLAGS_1", set())
+    if any("STATIC" in f for f in flags1):
+        raise ElfError("dynamic_app: linked -static (DF_1_STATIC present)")
+    if not any("PIE" in f for f in flags1):
+        raise ElfError("dynamic_app: not PIE (DF_1_PIE absent)")
+
+    _check_dynamic_relocs("dynamic_app", _relocs(reloc_text))
+
+
+def _check_dso(llvm_readelf, elf):
+    header_text = _run(llvm_readelf, "-h", elf)
+    phdr_text = _run(llvm_readelf, "-l", elf)
+    dyn_text = _run(llvm_readelf, "-d", elf)
+    reloc_text = _run(llvm_readelf, "-r", elf)
+    attr_text = _run(llvm_readelf, "-A", elf)
+
+    header = _parse_header(header_text)
+    _check_arm_abi(header, attr_text, "dso", check_entry=False)
+
+    if header["type"] != "DYN":
+        raise ElfError(f"dso: expected ET_DYN, got {header['type']}")
+    phdrs = _program_header_types(phdr_text)
+    if "INTERP" in phdrs:
+        raise ElfError("dso: PT_INTERP present")
+    if "DYNAMIC" not in phdrs:
+        raise ElfError("dso: PT_DYNAMIC missing")
+
+    tags = _dynamic_tags(dyn_text)
+    if not tags.get("SONAME"):
+        raise ElfError("dso: DT_SONAME missing (must export a soname)")
+
+    _check_dynamic_relocs("dso", _relocs(reloc_text))
+
+
+_CHECKERS = {
+    "kernel_static": _check_kernel_static,
+    "dynamic_app": _check_dynamic_app,
+    "dso": _check_dso,
+}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Validate a BlueOS artifact against its ELF contract.")
+    parser.add_argument("--profile",
+                        required=True,
+                        choices=_PROFILES,
+                        help="artifact link policy to validate")
+    parser.add_argument("elf", help="path to the ELF artifact")
+    parser.add_argument("--llvm-readelf",
+                        default=os.environ.get("LLVM_READELF", "llvm-readelf"),
+                        help="path to llvm-readelf (default: $LLVM_READELF or "
+                        "llvm-readelf)")
+    args = parser.parse_args(argv)
+
+    if not os.path.isfile(args.elf):
+        print(f"FAIL {args.profile}: {args.elf}: file not found",
+              file=sys.stderr)
+        return 1
+
+    try:
+        _CHECKERS[args.profile](args.llvm_readelf, args.elf)
+    except ElfError as error:
+        print(f"FAIL {args.profile}: {args.elf}: {error}", file=sys.stderr)
+        return 1
+
+    print(f"PASS {args.profile}: {args.elf}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
