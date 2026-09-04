@@ -20,7 +20,11 @@ import("//build/templates/rust.gni")
 # The image is relocated by the kernel loader against a `libc.so.1` dependency:
 # it must carry PT_DYNAMIC + DT_NEEDED, must be PIE (DF_1_PIE), and must not
 # carry PT_INTERP / `-static` / `-z norelro` (see `check_blueos_elf.py`). The
-# caller supplies the `libc.so.1` import (C19) through `deps`/`libs`.
+# caller supplies the `libc.so.1` import (C19) through `deps`/`rustflags` and
+# the `blueos_scrt1` start object through `start_object`.
+#
+# `start_object` is a GN static_library target (//librs:blueos_scrt1); its .a
+# is linked whole and first so `_start` becomes the PIE entry (C21).
 #
 # Produces two targets:
 #   :<name>        the linked `bin/<name>` (ET_DYN PIE)
@@ -31,11 +35,39 @@ template("dynamic_app") {
   _name = target_name
 
   build_rust(_name) {
-    forward_variables_from(invoker, "*", [ "rustflags" ])
+    forward_variables_from(invoker,
+                           "*",
+                           [
+                             "rustflags",
+                             "deps",
+                             "start_object",
+                           ])
     crate_type = "bin"
-    rustflags = dynamic_app_rustflags
+    # A dynamic application brings its own `blueos_scrt1` start object; the
+    # toolchain crt0 must never be linked in (C21).
+    rustflags = dynamic_app_rustflags + [ "-Clink-arg=-nostartfiles" ]
     if (defined(invoker.rustflags)) {
       rustflags += invoker.rustflags
+    }
+    deps = []
+    if (defined(invoker.deps)) {
+      deps += invoker.deps
+    }
+    if (defined(invoker.start_object)) {
+      # Link the start object whole and first: an archive only pulls members
+      # that resolve an undefined symbol, and `_start` has no referrer, so
+      # without `--whole-archive` the entry would vanish and the link would
+      # fail with an undefined `_start`.
+      _start_object = invoker.start_object
+      _start_out_dir = get_label_info(_start_object, "root_out_dir")
+      _start_name = get_label_info(_start_object, "name")
+      _start_lib = rebase_path("${_start_out_dir}/lib/lib${_start_name}.a")
+      rustflags += [
+        "-Clink-arg=-Wl,--whole-archive",
+        "-Clink-arg=${_start_lib}",
+        "-Clink-arg=-Wl,--no-whole-archive",
+      ]
+      deps += [ _start_object ]
     }
   }
 
