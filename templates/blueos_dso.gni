@@ -22,9 +22,16 @@ import("//build/templates/rust.gni")
 # PIC codegen and the hardened DSO flags (`-z relro -z now -z noexecstack
 # -z text`); the SONAME is a required contract (see `check_blueos_elf.py`).
 #
-# Produces two targets:
+# An optional `exports` manifest (a version-script-style file, C19 §8.2)
+# freezes the dynamic symbol table: a postlink action localizes every
+# GLOBAL/WEAK dynsym entry not listed in the manifest, and the contract gate
+# then asserts dynsym == manifest. rustc always generates its own version
+# script for cdylibs and rust-lld unions multiple scripts, so a link-time
+# script alone cannot hide rustc's list; the postlink freeze can.
+#
+# Produces:
 #   :<name>        the linked `lib/lib<crate_name>.so`
-#   :<name>_check  runs the ELF contract gate (depends on :<name>)
+#   :<name>_check  runs the ELF contract gate (after the export freeze)
 template("blueos_dso") {
   assert(defined(invoker.sources), "blueos_dso requires `sources`")
 
@@ -41,7 +48,7 @@ template("blueos_dso") {
   }
 
   build_rust(_name) {
-    forward_variables_from(invoker, "*", [ "rustflags" ])
+    forward_variables_from(invoker, "*", [ "rustflags", "export_manifest" ])
     crate_type = "cdylib"
     rustflags = dso_rustflags + [ "-Clink-arg=-soname=${_soname}" ]
     if (defined(invoker.rustflags)) {
@@ -52,16 +59,46 @@ template("blueos_dso") {
   _out_dir = get_label_info(":${_name}", "root_out_dir")
   _elf = "${_out_dir}/lib/lib${_crate_name}.so"
 
+  _check_deps = [ ":${_name}" ]
+  _check_inputs = [ _elf ]
+  _check_args = [
+    "--profile",
+    "dso",
+    rebase_path(_elf),
+  ]
+  if (defined(invoker.export_manifest)) {
+    _exports = invoker.export_manifest
+
+    action("${_name}_freeze") {
+      forward_variables_from(invoker, [ "testonly" ])
+      script = "//build/scripts/freeze_dso_exports.py"
+      deps = [ ":${_name}" ]
+      inputs = [
+        _elf,
+        _exports,
+      ]
+      args = [
+        "--elf",
+        rebase_path(_elf),
+        "--exports",
+        rebase_path(_exports),
+      ]
+      outputs = [ "${target_gen_dir}/${_name}_freeze.stamp" ]
+    }
+    _check_deps += [ ":${_name}_freeze" ]
+    _check_inputs += [ _exports ]
+    _check_args += [
+      "--exports",
+      rebase_path(_exports),
+    ]
+  }
+
   action("${_name}_check") {
     forward_variables_from(invoker, [ "testonly" ])
     script = "//build/scripts/check_blueos_elf.py"
-    inputs = [ _elf ]
-    deps = [ ":${_name}" ]
-    args = [
-      "--profile",
-      "dso",
-      rebase_path(_elf),
-    ]
+    inputs = _check_inputs
+    deps = _check_deps
+    args = _check_args
     outputs = [ "${target_gen_dir}/${_name}_check.stamp" ]
   }
 }

@@ -255,7 +255,7 @@ def _check_dynamic_app(llvm_readelf, elf):
     _check_dynamic_relocs("dynamic_app", _relocs(reloc_text))
 
 
-def _check_dso(llvm_readelf, elf):
+def _check_dso(llvm_readelf, elf, exports=None):
     header_text = _run(llvm_readelf, "-h", elf)
     phdr_text = _run(llvm_readelf, "-l", elf)
     dyn_text = _run(llvm_readelf, "-d", elf)
@@ -279,6 +279,62 @@ def _check_dso(llvm_readelf, elf):
 
     _check_dynamic_relocs("dso", _relocs(reloc_text))
 
+    if exports is not None:
+        _check_exports(llvm_readelf, elf, exports)
+
+
+def _parse_manifest(exports):
+    """Symbol names from the `global:` block of a version-script manifest."""
+    names = set()
+    in_global = False
+    with open(exports, encoding="utf-8") as handle:
+        for raw in handle:
+            line = raw.split("#", 1)[0].strip()
+            if line in ("{", ""):
+                continue
+            if line == "global:":
+                in_global = True
+            elif line == "local:":
+                in_global = False
+            elif in_global:
+                name = line.rstrip(";").strip()
+                if name and name != "*":
+                    names.add(name)
+    return names
+
+
+def _dynsym_globals(llvm_readelf, elf):
+    """GLOBAL/WEAK dynamic symbols, unversioned names."""
+    text = _run(llvm_readelf, "--dyn-syms", "-W", elf)
+    symbols = set()
+    for line in text.splitlines():
+        parts = line.split()
+        # -W format: Num: Value Size Type Bind Vis Ndx Name
+        if len(parts) < 8 or parts[4] not in ("GLOBAL", "WEAK"):
+            continue
+        name = parts[7]
+        if name and "@" not in name:
+            symbols.add(name)
+    return symbols
+
+
+def _check_exports(llvm_readelf, elf, exports):
+    """Assert the dynamic symbol table equals the export manifest exactly."""
+    manifest = _parse_manifest(exports)
+    if not manifest:
+        raise ElfError("dso: export manifest is empty; refusing to check")
+    exported = _dynsym_globals(llvm_readelf, elf)
+    extra = exported - manifest
+    missing = manifest - exported
+    if extra or missing:
+        detail = []
+        if extra:
+            detail.append("not in manifest: " + ", ".join(sorted(extra)))
+        if missing:
+            detail.append("not exported: " + ", ".join(sorted(missing)))
+        raise ElfError("dso: dynsym differs from the export manifest; " +
+                       "; ".join(detail))
+
 
 _CHECKERS = {
     "kernel_static": _check_kernel_static,
@@ -299,15 +355,30 @@ def main(argv=None):
                         default=os.environ.get("LLVM_READELF", "llvm-readelf"),
                         help="path to llvm-readelf (default: $LLVM_READELF or "
                         "llvm-readelf)")
+    parser.add_argument("--exports",
+                        default=None,
+                        help="dso only: version-script export manifest the "
+                        "dynamic symbol table must equal exactly")
     args = parser.parse_args(argv)
 
     if not os.path.isfile(args.elf):
         print(f"FAIL {args.profile}: {args.elf}: file not found",
               file=sys.stderr)
         return 1
+    if args.exports is not None and not os.path.isfile(args.exports):
+        print(f"FAIL {args.profile}: {args.exports}: file not found",
+              file=sys.stderr)
+        return 1
+    if args.exports is not None and args.profile != "dso":
+        print(f"FAIL {args.profile}: --exports is only valid for the dso "
+              f"profile", file=sys.stderr)
+        return 1
 
     try:
-        _CHECKERS[args.profile](args.llvm_readelf, args.elf)
+        if args.profile == "dso":
+            _check_dso(args.llvm_readelf, args.elf, args.exports)
+        else:
+            _CHECKERS[args.profile](args.llvm_readelf, args.elf)
     except ElfError as error:
         print(f"FAIL {args.profile}: {args.elf}: {error}", file=sys.stderr)
         return 1
