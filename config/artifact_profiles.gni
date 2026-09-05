@@ -68,4 +68,7 @@ dso_rustflags = [
   "-Clink-arg=-znow",
   "-Clink-arg=-znoexecstack",
   "-Clink-arg=-ztext",
+  # C30 §6: every dynamic artifact records a build-id for the package
+  # manifest and the runtime identity check.
+  "-Clink-arg=--build-id",
 ]

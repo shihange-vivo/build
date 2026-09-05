@@ -1,0 +1,192 @@
+# Copyright (c) 2026 vivo Mobile Communication Co., Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("//build/templates/blueos_dso.gni")
+import("//build/templates/dynamic_app.gni")
+
+# Build a manifest-closed dynamic application package (Phase 2, C30 §6).
+#
+# A package is a root dynamic application plus its private DSOs. Every image is
+# built as a real dynamic artifact (the root through `dynamic_app`, each
+# private DSO through `blueos_dso` with its SONAME), and the build then
+# generates a read-only manifest from the *final ELFs* and validates it
+# bidirectionally. The kernel consumes the manifest + the layout JSON at a
+# later commit; nothing here guesses the closure from GN arguments.
+#
+# Invoker contract:
+#   package_id          e.g. "multi"
+#   profile             dynamic target profile id (recorded in the manifest)
+#   system_sonames      reserved system SONAMEs (e.g. ["libc.so.1"])
+#   root_path           the package VFS path of the root, e.g. "/apps/multi/app.elf"
+#   root_sources        the root crate sources
+#   root_depends        private DSO names the root needs (link-order hint only)
+#   private_dsos        list of scopes: {
+#                         name       GN target name / crate name
+#                         soname     e.g. "libfoo.so.1"
+#                         vfs_path   e.g. "/apps/multi/lib/libfoo.so.1"
+#                         sources    crate sources
+#                         depends    private DSO names it links against
+#                       }
+#   extra_root_deps     optional additional root deps (default [])
+#
+# Produces:
+#   :<name>_root        the linked root PIE (bin/<name>_root)
+#   :<name>_manifest    the generated manifest JSON + layout JSON
+#   :<name>_check       the bidirectional package check
+template("blueos_app_package") {
+  assert(defined(invoker.package_id), "package_id required")
+  assert(defined(invoker.profile), "profile required")
+  assert(defined(invoker.root_sources), "root_sources required")
+  assert(defined(invoker.root_path), "root_path required")
+
+  _name = target_name
+  _system_sonames = []
+  if (defined(invoker.system_sonames)) {
+    _system_sonames = invoker.system_sonames
+  }
+  _lib_dir = rebase_path("${root_out_dir}/lib")
+
+  # --- private DSOs ---------------------------------------------------------
+  # blueos_dso emits lib/lib<name>.so for each private DSO.
+  _private_names = []
+  if (defined(invoker.private_dsos)) {
+    foreach(_dso, invoker.private_dsos) {
+      _private_names += [ _dso.name ]
+      blueos_dso(_dso.name) {
+        crate_name = _dso.name
+        soname = _dso.soname
+        sources = _dso.sources
+        deps = [
+          "//librs:libc",
+        ]
+        rustflags = [ "-Clink-arg=-L${_lib_dir}" ]
+        rustflags += [ "-Clink-arg=-l:liblibrs.so" ]
+        foreach(_dep, _dso.depends) {
+          rustflags += [ "-Clink-arg=-l:lib${_dep}.so" ]
+          deps += [ ":${_dep}" ]
+        }
+      }
+    }
+  }
+
+  # --- root ------------------------------------------------------------
+  dynamic_app("${_name}_root") {
+    sources = invoker.root_sources
+    start_object = "//librs:blueos_scrt1"
+    deps = [
+      "//librs:blueos_scrt1",
+      "//librs:libc",
+    ]
+    foreach(_dso, invoker.private_dsos) {
+      deps += [ ":${_dso.name}" ]
+    }
+    if (defined(invoker.extra_root_deps)) {
+      deps += invoker.extra_root_deps
+    }
+    rustflags = [
+      "-Clinker=clang",
+      "-Clink-arg=-fuse-ld=lld",
+      "-Clink-arg=--target=thumbv7m-none-eabi",
+      "-Clink-arg=-L${_lib_dir}",
+      "-Clink-arg=-l:liblibrs.so",
+      "-Clink-arg=-Wl,--export-dynamic-symbol=main",
+    ]
+    foreach(_dep, invoker.root_depends) {
+      rustflags += [ "-Clink-arg=-l:lib${_dep}.so" ]
+    }
+  }
+
+  # --- manifest generation --------------------------------------------------
+  _root_elf = "${root_out_dir}/bin/${_name}_root"
+  _manifest = "${target_gen_dir}/${_name}_manifest.json"
+  _layout = "${target_gen_dir}/${_name}_layout.json"
+
+  _manifest_args = [
+    "--package-id",
+    invoker.package_id,
+    "--profile",
+    invoker.profile,
+    "--root",
+    invoker.root_path + "," + rebase_path(_root_elf),
+    "--out",
+    rebase_path(_manifest),
+    "--layout",
+    rebase_path(_layout),
+  ]
+  foreach(_soname, _system_sonames) {
+    _manifest_args += [ "--system-soname", _soname ]
+  }
+  foreach(_dso, invoker.private_dsos) {
+    _manifest_args += [
+      "--private",
+      _dso.soname + "," + _dso.vfs_path + "," +
+      rebase_path("${root_out_dir}/lib/lib${_dso.name}.so"),
+    ]
+  }
+
+  action("${_name}_manifest") {
+    script = "//build/scripts/gen_blueos_app_manifest.py"
+    deps = [ ":${_name}_root" ]
+    foreach(_dso, invoker.private_dsos) {
+      deps += [ ":${_dso.name}" ]
+    }
+    inputs = [ _root_elf ]
+    foreach(_dso, invoker.private_dsos) {
+      inputs += [ "${root_out_dir}/lib/lib${_dso.name}.so" ]
+    }
+    args = _manifest_args
+    outputs = [
+      _manifest,
+      _layout,
+    ]
+  }
+
+  # --- bidirectional check --------------------------------------------------
+  _check_args = [
+    "--manifest",
+    rebase_path(_manifest),
+    "--root",
+    rebase_path(_root_elf),
+  ]
+  foreach(_dso, invoker.private_dsos) {
+    _check_args += [
+      "--private",
+      _dso.soname + "," + rebase_path("${root_out_dir}/lib/lib${_dso.name}.so"),
+    ]
+  }
+
+  action("${_name}_check") {
+    script = "//build/scripts/check_blueos_app_package.py"
+    deps = [
+      ":${_name}_manifest",
+      ":${_name}_root",
+    ]
+    foreach(_dso, invoker.private_dsos) {
+      deps += [ ":${_dso.name}" ]
+    }
+    inputs = [
+      _manifest,
+      _root_elf,
+    ]
+    foreach(_dso, invoker.private_dsos) {
+      inputs += [ "${root_out_dir}/lib/lib${_dso.name}.so" ]
+    }
+    args = _check_args
+    outputs = [ "${target_gen_dir}/${_name}_check.stamp" ]
+  }
+
+  group(_name) {
+    deps = [ ":${_name}_check" ]
+  }
+}
