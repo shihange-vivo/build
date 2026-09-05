@@ -26,7 +26,14 @@ PLT/GOT relocations included) keeps working, while the dynamic symbol table
 equals the manifest exactly (`check_blueos_elf.py --exports` verifies this)
 and app links against the DSO can no longer resolve off-manifest names.
 
-Usage: freeze_dso_exports.py --elf <path> --exports <path>
+Usage: freeze_dso_exports.py --elf <path> --exports <path> [--out <path>]
+
+The frozen output is written to `--out` (default: `<elf>.frozen`). The
+original artifact is left untouched: app links consume the unfrozen DSO,
+while the kernel embeds the frozen one — strictly validating consumers
+(rust-lld) reject a `.dynsym` whose hash tables still cover names that
+were localized in place, so re-freezing the shared artifact must not
+rewrite what other links read.
 """
 
 import argparse
@@ -94,6 +101,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--elf", required=True)
     parser.add_argument("--exports", required=True)
+    parser.add_argument("--out", default=None)
     args = parser.parse_args()
 
     manifest = parse_manifest(args.exports)
@@ -162,15 +170,16 @@ def main():
         struct.pack_into("<I", data, dynsym["header_off"] + 28, first_global)
 
     # Write via a sibling temp file and rename so parallel consumers of the
-    # DSO (e.g. a dynamic-app link) never observe a partially written ELF.
+    # output (e.g. the kernel seed) never observe a partially written ELF.
     import os
     import tempfile
-    dirname = os.path.dirname(args.elf)
+    target = args.out if args.out else args.elf + ".frozen"
+    dirname = os.path.dirname(target)
     fd, tmp = tempfile.mkstemp(dir=dirname, prefix=".freeze-")
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
-        os.replace(tmp, args.elf)
+        os.replace(tmp, target)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
