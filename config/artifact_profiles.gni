@@ -64,6 +64,16 @@ dynamic_app_rustflags = [
 dso_rustflags = [
   "-Crelocation-model=pic",
   "-Cpanic=abort",
+  # The bare `-z...`/`--build-id`/`-soname` spellings below require raw
+  # rust-lld with GNU argument conventions (`Gnu(Cc::No, Lld::Yes)`). The
+  # v7-M target spec defaults to that, but the hard-float v8-M spec still
+  # defaults to the arm-none-eabi-gcc driver (C32-2), so pin the linker
+  # here instead of relying on the spec: `gnu-lld` is exactly the
+  # `Gnu(Cc::No, Lld::Yes)` flavor, which the fork's rustc accepts with
+  # `-Zunstable-options`.
+  "-Clinker=rust-lld",
+  "-Clinker-flavor=gnu-lld",
+  "-Zunstable-options",
   "-Clink-arg=-zrelro",
   "-Clink-arg=-znow",
   "-Clink-arg=-znoexecstack",

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import("//build/config/artifact_profiles.gni")
+import("//build/boards/${board}.gni")
 import("//build/templates/rust.gni")
 
 # Build a PIC shared object (ET_DYN, `-shared`) with a SONAME and gate its ELF
@@ -36,6 +37,10 @@ template("blueos_dso") {
   assert(defined(invoker.sources), "blueos_dso requires `sources`")
 
   _name = target_name
+  _target_profile = dynamic_profile_id
+  if (defined(invoker.target_profile)) {
+    _target_profile = invoker.target_profile
+  }
 
   _crate_name = _name
   if (defined(invoker.crate_name)) {
@@ -66,6 +71,8 @@ template("blueos_dso") {
   _check_args = [
     "--profile",
     "dso",
+    "--target-profile",
+    _target_profile,
   ]
   if (defined(invoker.export_manifest)) {
     # The contract gate validates the *frozen* artifact, not the raw link.
@@ -106,6 +113,11 @@ template("blueos_dso") {
       rebase_path(_exports),
     ]
   }
+
+  _check_args += [
+    "--stamp",
+    rebase_path("${target_gen_dir}/${_name}_check.stamp"),
+  ]
 
   action("${_name}_check") {
     forward_variables_from(invoker, [ "testonly" ])

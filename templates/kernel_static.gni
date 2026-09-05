@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import("//build/config/artifact_profiles.gni")
+import("//build/boards/${board}.gni")
 import("//build/templates/rust.gni")
 
 # Build a fixed-address static kernel image (ET_EXEC) and gate its ELF contract.
@@ -30,6 +31,10 @@ template("kernel_static") {
   assert(defined(invoker.sources), "kernel_static requires `sources`")
 
   _name = target_name
+  _target_profile = dynamic_profile_id
+  if (defined(invoker.target_profile)) {
+    _target_profile = invoker.target_profile
+  }
 
   build_rust(_name) {
     forward_variables_from(invoker, "*", [ "rustflags" ])
@@ -51,6 +56,10 @@ template("kernel_static") {
     args = [
       "--profile",
       "kernel_static",
+      "--target-profile",
+      _target_profile,
+      "--stamp",
+      rebase_path("${target_gen_dir}/${_name}_check.stamp"),
       rebase_path(_elf),
     ]
     outputs = [ "${target_gen_dir}/${_name}_check.stamp" ]

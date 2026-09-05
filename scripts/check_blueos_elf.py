@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Validate a BlueOS artifact against its ELF contract (Phase 1, C18).
+"""Validate a BlueOS artifact against its ELF and target contracts.
 
 This is the build-time gate for the three artifact link policies introduced in
 `build/config/artifact_profiles.gni`:
@@ -27,10 +27,10 @@ This is the build-time gate for the three artifact link policies introduced in
   * `dso` — PIC shared object (ET_DYN). Requires DT_SONAME and forbids an
     interpreter.
 
-All profiles share the ARM32 soft-float Thumb ABI contract (ELFCLASS32 +
-EM_ARM + Thumb-only + soft-float EABI) and, for dynamic artifacts, a
-first-class relocation whitelist (`R_ARM_RELATIVE`/`R_ARM_ABS32`/
-`R_ARM_GLOB_DAT`/`R_ARM_JUMP_SLOT`).
+The artifact policy and target profile are orthogonal. ``--profile`` selects
+kernel/PIE/DSO rules; ``--target-profile`` selects class, machine, ABI flags,
+entry convention and the exact dynamic-relocation allowlist. Keeping this
+table here makes an unsupported architecture fail closed before packaging.
 
 The script shells out to `llvm-readelf` (override with `LLVM_READELF`). It
 reads only ELF metadata; it never executes the artifact.
@@ -41,36 +41,65 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 # e_flags bits (ARM EABI). See the ARM ELF ABI spec, EF_ARM_*.
 _EF_ARM_ABI_FLOAT_MASK = 0x600
 _EF_ARM_ABI_FLOAT_SOFT = 0x200
+_EF_ARM_ABI_FLOAT_HARD = 0x400
 _EF_ARM_EABIMASK = 0xFF000000
 _EF_ARM_EABI_VER5 = 0x05000000
 
-# Phase-1 first-class relocation set (plan §13.3). Anything outside this set
-# fails the dynamic artifact gate.
-_ALLOWED_RELOCS = frozenset({
-    "R_ARM_RELATIVE",
-    "R_ARM_ABS32",
-    "R_ARM_GLOB_DAT",
-    "R_ARM_JUMP_SLOT",
+_ARM_RELOCS = frozenset({
+    "R_ARM_RELATIVE", "R_ARM_ABS32", "R_ARM_GLOB_DAT", "R_ARM_JUMP_SLOT",
+})
+_RISCV64_RELOCS = frozenset({
+    "R_RISCV_RELATIVE", "R_RISCV_64", "R_RISCV_JUMP_SLOT",
+})
+_RISCV32_RELOCS = frozenset({
+    "R_RISCV_RELATIVE", "R_RISCV_32", "R_RISCV_JUMP_SLOT",
+})
+_AARCH64_RELOCS = frozenset({
+    "R_AARCH64_RELATIVE", "R_AARCH64_ABS64", "R_AARCH64_GLOB_DAT",
+    "R_AARCH64_JUMP_SLOT",
 })
 
-# Text (instruction) relocations that must never reach a dynamic image; they
-# indicate a non-PIC call/absolute access that the loader cannot relocate
-# safely (plan §7 "PltGotOnly").
-_TEXT_RELOCS = frozenset({
-    "R_ARM_CALL",
-    "R_ARM_JUMP24",
-    "R_ARM_THM_CALL",
-    "R_ARM_THM_JUMP24",
-    "R_ARM_PREL31",
-    "R_ARM_MOVW_ABS_NC",
-    "R_ARM_MOVT_ABS",
-    "R_ARM_THM_MOVW_ABS_NC",
-    "R_ARM_THM_MOVT_ABS",
-})
+# These target ids are package/board policy ids, not values trusted from the
+# input ELF. Entries for C33-C35 intentionally precede runtime enablement so
+# their producer gates can land before their loader backends.
+_TARGET_PROFILES = {
+    "thumbv7m-vivo-blueos-newlibeabi": {
+        "class": "ELF32", "machine": "ARM", "flags_mask": 0xFF000600,
+        "flags_value": _EF_ARM_EABI_VER5 | _EF_ARM_ABI_FLOAT_SOFT,
+        "entry": "thumb", "arm_cpu": "ARM v7", "arm_float": "soft",
+        "relocs": _ARM_RELOCS,
+    },
+    "thumbv8m-main-vivo-blueos-newlibeabihf": {
+        "class": "ELF32", "machine": "ARM", "flags_mask": 0xFF000600,
+        "flags_value": _EF_ARM_EABI_VER5 | _EF_ARM_ABI_FLOAT_HARD,
+        "entry": "thumb", "arm_cpu": "ARM v8-M Mainline",
+        "arm_float": "hard", "relocs": _ARM_RELOCS,
+    },
+    "riscv64-vivo-blueos": {
+        "class": "ELF64", "machine": "RISC-V", "flags_mask": 0xF,
+        "flags_value": 0x1, "entry": "aligned2", "riscv_xlen": 64,
+        "riscv_extensions": frozenset("imac"), "relocs": _RISCV64_RELOCS,
+    },
+    "aarch64-vivo-blueos": {
+        "class": "ELF64", "machine": "AArch64", "flags_mask": 0,
+        "flags_value": 0, "entry": "aligned4", "relocs": _AARCH64_RELOCS,
+    },
+    "riscv32-vivo-blueos-imac": {
+        "class": "ELF32", "machine": "RISC-V", "flags_mask": 0xF,
+        "flags_value": 0x1, "entry": "aligned2", "riscv_xlen": 32,
+        "riscv_extensions": frozenset("imac"), "relocs": _RISCV32_RELOCS,
+    },
+    "riscv32-vivo-blueos-imc": {
+        "class": "ELF32", "machine": "RISC-V", "flags_mask": 0xF,
+        "flags_value": 0x1, "entry": "aligned2", "riscv_xlen": 32,
+        "riscv_extensions": frozenset("imc"), "relocs": _RISCV32_RELOCS,
+    },
+}
 
 _PROFILES = ("kernel_static", "dynamic_app", "dso")
 
@@ -96,16 +125,18 @@ def _run(llvm_readelf, *args):
 
 
 def _parse_header(text):
-    """Extract class/machine/type/flags/entry from `llvm-readelf -h`."""
+    """Extract class/data/machine/type/flags/entry from `llvm-readelf -h`."""
     class_ = re.search(r"Class:\s+(\S+)", text)
+    data = re.search(r"Data:\s+(.+)$", text, re.M)
     machine = re.search(r"Machine:\s+(\S+)", text)
     elftype = re.search(r"Type:\s+(\S+)", text)
     flags = re.search(r"Flags:\s+(0x[0-9A-Fa-f]+)", text)
     entry = re.search(r"Entry point address:\s+(0x[0-9A-Fa-f]+)", text)
-    if not (class_ and machine and elftype and flags and entry):
+    if not (class_ and data and machine and elftype and flags and entry):
         raise ElfError("unable to parse ELF header from `llvm-readelf -h`")
     return {
         "class": class_.group(1),
+        "data": data.group(1).strip(),
         "machine": machine.group(1),
         "type": elftype.group(1),
         "flags": int(flags.group(1), 16),
@@ -122,6 +153,24 @@ def _program_header_types(text):
     return types
 
 
+def _program_headers(text):
+    """Return ``(type, flags)`` pairs from ``llvm-readelf -l``.
+
+    The flag column may be rendered as either ``R E`` or ``RW``. Taking every
+    token between ``MemSiz`` and ``Align`` keeps the parser independent of ELF
+    class and llvm-readelf's spacing.
+    """
+    headers = []
+    for line in text.splitlines():
+        if not re.match(r"^\s{2}\S+\s+0x[0-9A-Fa-f]+", line):
+            continue
+        fields = line.split()
+        if len(fields) < 8:
+            continue
+        headers.append((fields[0], "".join(fields[6:-1])))
+    return headers
+
+
 def _dynamic_tags(text):
     """Map dynamic tag name -> set of string values from `llvm-readelf -d`."""
     tags = {}
@@ -134,7 +183,7 @@ def _dynamic_tags(text):
 
 def _relocs(text):
     """Return the set of relocation type names from `llvm-readelf -r`."""
-    return set(re.findall(r"\b(R_ARM_[A-Z0-9_]+)\b", text))
+    return set(re.findall(r"\b(R_[A-Z0-9]+_[A-Z0-9_]+)\b", text))
 
 
 def _attribute_description(text, tag_name):
@@ -149,53 +198,137 @@ def _attribute_description(text, tag_name):
     return None
 
 
-def _check_arm_abi(header, attr_text, profile, check_entry=True):
-    """Shared ARM32 soft-float Thumb contract.
+def _attribute_value(text, tag_name):
+    """Read the ``Value:`` following an ELF build-attribute tag."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if re.search(rf"TagName:\s*{tag_name}\s*$", line):
+            for lookahead in lines[i + 1:i + 3]:
+                match = re.search(r"Value:\s*(.+)$", lookahead)
+                if match:
+                    return match.group(1).strip()
+    return None
 
-    `check_entry` gates the Thumb entry-address check: it applies to the
-    executable profiles (`kernel_static`, `dynamic_app`) but not to `dso`,
-    whose `e_entry` is conventionally 0 (shared objects have no entry point).
-    """
-    if header["class"] != "ELF32":
-        raise ElfError(f"{profile}: expected ELFCLASS32, got {header['class']}")
-    if header["machine"] != "ARM":
-        raise ElfError(f"{profile}: expected EM_ARM, got {header['machine']}")
 
+def _riscv_arch_contract(attr_text, target, prefix):
+    """Validate XLEN and the exact standard single-letter ISA set."""
+    arch = _attribute_value(attr_text, "arch")
+    if arch is None:
+        raise ElfError(f"{prefix}: RISC-V arch attribute missing")
+    match = re.match(r"rv(32|64)([a-z])(?:\d+p\d+)?(?:_|$)", arch)
+    if match is None:
+        raise ElfError(f"{prefix}: malformed RISC-V arch attribute {arch!r}")
+    xlen = int(match.group(1))
+    if xlen != target["riscv_xlen"]:
+        raise ElfError(f"{prefix}: RISC-V arch XLEN is {xlen}, expected "
+                       f"{target['riscv_xlen']}")
+
+    extensions = {match.group(2)}
+    for component in arch.split("_")[1:]:
+        extension = re.match(r"([a-z]+?)(?:\d|$)", component)
+        if extension and len(extension.group(1)) == 1:
+            extensions.add(extension.group(1))
+    expected = target["riscv_extensions"]
+    if extensions != expected:
+        raise ElfError(f"{prefix}: RISC-V ISA is {''.join(sorted(extensions))}, "
+                       f"expected {''.join(sorted(expected))}")
+
+    stack_align = _attribute_description(attr_text, "stack_align")
+    if stack_align != "Stack alignment is 16-bytes":
+        raise ElfError(f"{prefix}: RISC-V stack alignment is {stack_align!r}, "
+                       "expected 16 bytes")
+
+
+def _check_target_abi(header, attr_text, artifact_profile, target_id,
+                      check_entry=True):
+    """Validate metadata selected by board/package policy, never by the ELF."""
+    target = _TARGET_PROFILES[target_id]
+    prefix = f"{artifact_profile}/{target_id}"
+    if header["class"] != target["class"]:
+        raise ElfError(f"{prefix}: expected {target['class']}, "
+                       f"got {header['class']}")
+    if "little endian" not in header["data"].lower():
+        raise ElfError(f"{prefix}: expected little-endian ELF, "
+                       f"got {header['data']}")
+    if header["machine"] != target["machine"]:
+        raise ElfError(f"{prefix}: expected machine {target['machine']}, "
+                       f"got {header['machine']}")
     flags = header["flags"]
-    if (flags & _EF_ARM_EABIMASK) != _EF_ARM_EABI_VER5:
-        raise ElfError(f"{profile}: expected EABI5 e_flags, got "
-                       f"0x{flags:08x}")
-    if (flags & _EF_ARM_ABI_FLOAT_MASK) != _EF_ARM_ABI_FLOAT_SOFT:
-        raise ElfError(f"{profile}: expected soft-float EABI, got e_flags "
-                       f"0x{flags:08x}")
+    if flags & target["flags_mask"] != target["flags_value"]:
+        raise ElfError(f"{prefix}: incompatible e_flags 0x{flags:08x} "
+                       f"(mask 0x{target['flags_mask']:x}, expected "
+                       f"0x{target['flags_value']:x})")
 
-    # Thumb-only: the executable entry must be a Thumb address (bit 0 set) and,
-    # when the artifact carries .ARM.attributes, ARM instructions must be
-    # disallowed.
-    if check_entry and header["entry"] & 1 != 1:
-        raise ElfError(f"{profile}: entry 0x{header['entry']:x} is not a "
-                       f"Thumb address (bit 0 clear)")
+    if check_entry and target["entry"] == "thumb" and header["entry"] & 1 != 1:
+        raise ElfError(f"{prefix}: entry 0x{header['entry']:x} is not Thumb")
+    if check_entry and target["entry"] == "aligned2" and header["entry"] & 1:
+        raise ElfError(f"{prefix}: entry 0x{header['entry']:x} is not 2-byte aligned")
+    if check_entry and target["entry"] == "aligned4" and header["entry"] & 3:
+        raise ElfError(f"{prefix}: entry 0x{header['entry']:x} is not 4-byte aligned")
+
+    if target["machine"] == "RISC-V":
+        _riscv_arch_contract(attr_text, target, prefix)
+        return
+    if target["machine"] != "ARM":
+        return
     arm_isa = _attribute_description(attr_text, "ARM_ISA_use")
     if arm_isa is not None and arm_isa != "Not Permitted":
-        raise ElfError(f"{profile}: ARM_ISA_use is {arm_isa!r}, expected "
+        raise ElfError(f"{prefix}: ARM_ISA_use is {arm_isa!r}, expected "
                        f"Thumb-only (Not Permitted)")
+    cpu_arch = _attribute_description(attr_text, "CPU_arch")
+    if cpu_arch != target["arm_cpu"]:
+        raise ElfError(f"{prefix}: CPU_arch is {cpu_arch!r}, expected "
+                       f"{target['arm_cpu']!r}")
+    vfp_args = _attribute_description(attr_text, "ABI_VFP_args")
+    if target["arm_float"] == "hard":
+        if vfp_args != "AAPCS VFP":
+            raise ElfError(f"{prefix}: ABI_VFP_args is {vfp_args!r}, "
+                           "expected 'AAPCS VFP'")
+        if _attribute_description(attr_text, "FP_arch") is None:
+            raise ElfError(f"{prefix}: FP_arch attribute missing")
+    elif vfp_args == "AAPCS VFP":
+        raise ElfError(f"{prefix}: hard-float ABI_VFP_args on soft-float target")
 
 
-def _check_dynamic_relocs(profile, relocs):
+def _check_dynamic_relocs(profile, target_id, relocs):
     """Enforce the relocation whitelist and reject text relocations."""
     if not relocs:
         return
-    text = relocs & _TEXT_RELOCS
-    if text:
-        raise ElfError(f"{profile}: text relocation(s) present: "
-                       f"{', '.join(sorted(text))}")
-    unknown = relocs - _ALLOWED_RELOCS
+    unknown = relocs - _TARGET_PROFILES[target_id]["relocs"]
     if unknown:
-        raise ElfError(f"{profile}: relocation(s) outside first-class "
+        raise ElfError(f"{profile}/{target_id}: relocation(s) outside first-class "
                        f"whitelist: {', '.join(sorted(unknown))}")
 
 
-def _check_kernel_static(llvm_readelf, elf):
+def _check_load_hardening(profile, phdr_text):
+    """Reject executable stacks, W+X loads, and native ELF TLS."""
+    headers = _program_headers(phdr_text)
+    for kind, flags in headers:
+        if kind == "LOAD" and "W" in flags and "E" in flags:
+            raise ElfError(f"{profile}: writable executable PT_LOAD present")
+        if kind == "GNU_STACK" and "E" in flags:
+            raise ElfError(f"{profile}: executable GNU_STACK present")
+    if any(kind == "TLS" for kind, _ in headers):
+        raise ElfError(f"{profile}: PT_TLS present (Phase 2 uses emutls)")
+
+
+def _check_dynamic_hardening(profile, phdr_text, tags, note_text):
+    """Enforce the common NOW/RELRO/search/build-id dynamic contract."""
+    phdrs = _program_header_types(phdr_text)
+    if "GNU_RELRO" not in phdrs:
+        raise ElfError(f"{profile}: PT_GNU_RELRO missing")
+    for forbidden in ("TEXTREL", "RPATH", "RUNPATH"):
+        if forbidden in tags:
+            raise ElfError(f"{profile}: DT_{forbidden} present")
+    now = any("BIND_NOW" in value for value in tags.get("FLAGS", set()))
+    now = now or any("NOW" in value for value in tags.get("FLAGS_1", set()))
+    if not now:
+        raise ElfError(f"{profile}: NOW binding missing")
+    if not re.search(r"\bBuild ID:\s*[0-9A-Fa-f]+", note_text):
+        raise ElfError(f"{profile}: GNU build-id missing")
+
+
+def _check_kernel_static(llvm_readelf, elf, target_id):
     header_text = _run(llvm_readelf, "-h", elf)
     phdr_text = _run(llvm_readelf, "-l", elf)
     dyn_text = _run(llvm_readelf, "-d", elf)
@@ -203,7 +336,8 @@ def _check_kernel_static(llvm_readelf, elf):
     attr_text = _run(llvm_readelf, "-A", elf)
 
     header = _parse_header(header_text)
-    _check_arm_abi(header, attr_text, "kernel_static")
+    _check_target_abi(header, attr_text, "kernel_static", target_id)
+    _check_load_hardening("kernel_static", phdr_text)
 
     if header["type"] != "EXEC":
         raise ElfError(f"kernel_static: expected ET_EXEC, got {header['type']}")
@@ -222,18 +356,20 @@ def _check_kernel_static(llvm_readelf, elf):
         raise ElfError("kernel_static: DF_TEXTREL present")
 
     # A fully static PIC link must leave no runtime relocation behind.
-    _check_dynamic_relocs("kernel_static", _relocs(reloc_text))
+    _check_dynamic_relocs("kernel_static", target_id, _relocs(reloc_text))
 
 
-def _check_dynamic_app(llvm_readelf, elf):
+def _check_dynamic_app(llvm_readelf, elf, target_id):
     header_text = _run(llvm_readelf, "-h", elf)
     phdr_text = _run(llvm_readelf, "-l", elf)
     dyn_text = _run(llvm_readelf, "-d", elf)
     reloc_text = _run(llvm_readelf, "-r", elf)
     attr_text = _run(llvm_readelf, "-A", elf)
+    note_text = _run(llvm_readelf, "-n", elf)
 
     header = _parse_header(header_text)
-    _check_arm_abi(header, attr_text, "dynamic_app")
+    _check_target_abi(header, attr_text, "dynamic_app", target_id)
+    _check_load_hardening("dynamic_app", phdr_text)
 
     if header["type"] != "DYN":
         raise ElfError(f"dynamic_app: expected ET_DYN, got {header['type']}")
@@ -251,19 +387,22 @@ def _check_dynamic_app(llvm_readelf, elf):
         raise ElfError("dynamic_app: linked -static (DF_1_STATIC present)")
     if not any("PIE" in f for f in flags1):
         raise ElfError("dynamic_app: not PIE (DF_1_PIE absent)")
+    _check_dynamic_hardening("dynamic_app", phdr_text, tags, note_text)
 
-    _check_dynamic_relocs("dynamic_app", _relocs(reloc_text))
+    _check_dynamic_relocs("dynamic_app", target_id, _relocs(reloc_text))
 
 
-def _check_dso(llvm_readelf, elf, exports=None):
+def _check_dso(llvm_readelf, elf, target_id, exports=None):
     header_text = _run(llvm_readelf, "-h", elf)
     phdr_text = _run(llvm_readelf, "-l", elf)
     dyn_text = _run(llvm_readelf, "-d", elf)
     reloc_text = _run(llvm_readelf, "-r", elf)
     attr_text = _run(llvm_readelf, "-A", elf)
+    note_text = _run(llvm_readelf, "-n", elf)
 
     header = _parse_header(header_text)
-    _check_arm_abi(header, attr_text, "dso", check_entry=False)
+    _check_target_abi(header, attr_text, "dso", target_id, check_entry=False)
+    _check_load_hardening("dso", phdr_text)
 
     if header["type"] != "DYN":
         raise ElfError(f"dso: expected ET_DYN, got {header['type']}")
@@ -276,8 +415,9 @@ def _check_dso(llvm_readelf, elf, exports=None):
     tags = _dynamic_tags(dyn_text)
     if not tags.get("SONAME"):
         raise ElfError("dso: DT_SONAME missing (must export a soname)")
+    _check_dynamic_hardening("dso", phdr_text, tags, note_text)
 
-    _check_dynamic_relocs("dso", _relocs(reloc_text))
+    _check_dynamic_relocs("dso", target_id, _relocs(reloc_text))
 
     if exports is not None:
         _check_exports(llvm_readelf, elf, exports)
@@ -350,6 +490,10 @@ def main(argv=None):
                         required=True,
                         choices=_PROFILES,
                         help="artifact link policy to validate")
+    parser.add_argument("--target-profile",
+                        required=True,
+                        choices=tuple(_TARGET_PROFILES),
+                        help="board/package-selected target ABI profile")
     parser.add_argument("elf", help="path to the ELF artifact")
     parser.add_argument("--llvm-readelf",
                         default=os.environ.get("LLVM_READELF", "llvm-readelf"),
@@ -359,6 +503,9 @@ def main(argv=None):
                         default=None,
                         help="dso only: version-script export manifest the "
                         "dynamic symbol table must equal exactly")
+    parser.add_argument("--stamp",
+                        default=None,
+                        help="touch this GN action output after a successful check")
     args = parser.parse_args(argv)
 
     if not os.path.isfile(args.elf):
@@ -376,14 +523,20 @@ def main(argv=None):
 
     try:
         if args.profile == "dso":
-            _check_dso(args.llvm_readelf, args.elf, args.exports)
+            _check_dso(args.llvm_readelf, args.elf, args.target_profile,
+                       args.exports)
         else:
-            _CHECKERS[args.profile](args.llvm_readelf, args.elf)
+            _CHECKERS[args.profile](args.llvm_readelf, args.elf,
+                                    args.target_profile)
     except ElfError as error:
         print(f"FAIL {args.profile}: {args.elf}: {error}", file=sys.stderr)
         return 1
 
-    print(f"PASS {args.profile}: {args.elf}")
+    if args.stamp is not None:
+        stamp = Path(args.stamp)
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+    print(f"PASS {args.profile}/{args.target_profile}: {args.elf}")
     return 0
 
 

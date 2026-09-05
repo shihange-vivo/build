@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import("//build/config/artifact_profiles.gni")
+import("//build/boards/${board}.gni")
 import("//build/templates/rust.gni")
 
 # Build a PIC/PIE dynamic application (ET_DYN) and gate its ELF contract.
@@ -33,6 +34,10 @@ template("dynamic_app") {
   assert(defined(invoker.sources), "dynamic_app requires `sources`")
 
   _name = target_name
+  _target_profile = dynamic_profile_id
+  if (defined(invoker.target_profile)) {
+    _target_profile = invoker.target_profile
+  }
 
   build_rust(_name) {
     forward_variables_from(invoker,
@@ -82,6 +87,10 @@ template("dynamic_app") {
     args = [
       "--profile",
       "dynamic_app",
+      "--target-profile",
+      _target_profile,
+      "--stamp",
+      rebase_path("${target_gen_dir}/${_name}_check.stamp"),
       rebase_path(_elf),
     ]
     outputs = [ "${target_gen_dir}/${_name}_check.stamp" ]

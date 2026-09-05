@@ -71,6 +71,7 @@ template("blueos_app_package") {
   if (defined(invoker.private_dsos)) {
     foreach(_dso, _private_dsos) {
       blueos_dso(_dso.name) {
+        target_profile = _profile
         crate_name = _dso.name
         soname = _dso.soname
         sources = _dso.sources
@@ -92,6 +93,7 @@ template("blueos_app_package") {
 
   # --- root ------------------------------------------------------------
   dynamic_app("${_name}_root") {
+    target_profile = _profile
     sources = invoker.root_sources
     start_object = "//librs:blueos_scrt1"
     deps = [
@@ -112,6 +114,9 @@ template("blueos_app_package") {
       "-Clink-arg=-l:liblibrs.so",
       "-Clink-arg=-Wl,--export-dynamic-symbol=main",
     ]
+    foreach(_option, dynamic_link_options) {
+      rustflags += [ "-Clink-arg=${_option}" ]
+    }
     foreach(_dep, invoker.root_depends) {
       rustflags += [ "-Clink-arg=-l:lib${_dep}.so" ]
     }
@@ -151,8 +156,10 @@ template("blueos_app_package") {
   action("${_name}_manifest") {
     script = "//build/scripts/gen_blueos_app_manifest.py"
     deps = [ ":${_name}_root" ]
+    deps += [ ":${_name}_root_check" ]
     foreach(_dso, _private_dsos) {
       deps += [ ":${_dso.name}" ]
+      deps += [ ":${_dso.name}_check" ]
     }
     inputs = [ _root_elf ]
     foreach(_dso, _private_dsos) {

@@ -22,8 +22,9 @@ tmpfs at boot (C29, §18.1/18.2). An optional `--layout <json>` (the package
 layout emitted by `gen_blueos_app_manifest.py`) adds every package image
 with a symbol derived from its VFS path — the same naming rule
 `gen_app_package_catalog.py` uses, so the catalog's `image_blob` resolves to
-these symbols. The output is assembled with the board kernel config (Thumb
-flags) and linked into every kernel image that depends on the blueos crate.
+these symbols. The emitted directives are architecture-neutral; the output is
+assembled with the board kernel config and linked into every kernel image that
+depends on the blueos crate.
 
 Usage: gen_seed_blob_asm.py --out <file.S> \
           --blob hello,/abs/path/bin/hello \
@@ -80,7 +81,6 @@ def main():
         for symbol, path in blobs:
             digest = hashlib.sha256(open(path, "rb").read()).hexdigest()[:16]
             handle.write(f"// blob {symbol}: {digest}\n")
-        handle.write("    .syntax unified\n")
         handle.write("    .section .bk_seed,\"a\",%progbits\n")
         for symbol, path in blobs:
             handle.write("    .balign 16\n")
