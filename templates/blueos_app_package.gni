@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import("//build/boards/${board}.gni")
 import("//build/templates/blueos_dso.gni")
 import("//build/templates/dynamic_app.gni")
 
@@ -46,11 +47,14 @@ import("//build/templates/dynamic_app.gni")
 #   :<name>_check       the bidirectional package check
 template("blueos_app_package") {
   assert(defined(invoker.package_id), "package_id required")
-  assert(defined(invoker.profile), "profile required")
+  assert(defined(invoker.profile), "profile required (§9.1: pass the board's dynamic_profile_id)")
   assert(defined(invoker.root_sources), "root_sources required")
   assert(defined(invoker.root_path), "root_path required")
 
   _name = target_name
+  # §9.1: the *board* policy picks the dynamic target profile; each package
+  # BUILD.gn forwards the board's dynamic_profile_id through the call block.
+  _profile = invoker.profile
   _system_sonames = []
   if (defined(invoker.system_sonames)) {
     _system_sonames = invoker.system_sonames
@@ -125,7 +129,7 @@ template("blueos_app_package") {
     "--package-id",
     invoker.package_id,
     "--profile",
-    invoker.profile,
+    _profile,
     "--root",
     invoker.root_path + "," + rebase_path(_root_elf),
     "--out",
