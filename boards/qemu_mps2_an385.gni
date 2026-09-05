@@ -17,6 +17,11 @@ default_linker_script = "${root_gen_dir}/link.pre.ld"
 qemu_exe = "qemu-system-arm"
 qemu_machine = "mps2-an385"
 rust_abi_target = "thumbv7m-none-eabi"
+# The dynamic-application profile identity (§9.1): recorded in package
+# manifests and mapped by the kernel to the loader's LoadProfile.
+dynamic_profile_id = "thumbv7m-vivo-blueos-newlibeabi"
+# The clang/LLD --target spelling for dynamic root links (board ABI config).
+dynamic_link_target = "thumbv7m-none-eabi"
 qemu_extra_args = []
 qemu_net_args = []
 qemu_block_args = []
