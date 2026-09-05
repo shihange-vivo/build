@@ -132,20 +132,26 @@ def main():
         end = strtab_bytes.find(b"\x00", st_name)
         return strtab_bytes[st_name:end].decode("ascii", "replace")
 
-    localized = 0
+    # Two-way sync: manifest names become GLOBAL, everything else LOCAL.
+    # Re-freezing an already frozen DSO must therefore restore bindings for
+    # manifest symbols that a later ABI diff added back.
+    changed = 0
     first_global = 0
     for off in range(dynsym["offset"],
                      dynsym["offset"] + dynsym["size"], dynsym["entsize"]):
         st_name = struct.unpack_from("<I", data, off)[0]
         st_info = data[off + 12]
-        binding = st_info >> 4
-        if binding not in (STB_GLOBAL, STB_WEAK):
-            continue
         name = symbol_name(st_name)
-        if name and "@" not in name and name not in manifest:
-            data[off + 12] = (st_info & 0x0F) | (STB_LOCAL << 4)
-            localized += 1
-        elif first_global == 0:
+        if not name or "@" in name:
+            continue
+        if name in manifest:
+            binding = STB_GLOBAL
+        else:
+            binding = STB_LOCAL
+        if (st_info >> 4) != binding:
+            data[off + 12] = (st_info & 0x0F) | (binding << 4)
+            changed += 1
+        if binding != STB_LOCAL and first_global == 0:
             first_global = (off - dynsym["offset"]) // dynsym["entsize"]
 
     # Keep sh_info consistent: it records the index of the first non-local
@@ -168,7 +174,7 @@ def main():
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
-    print("freeze_dso_exports: localized {} symbols".format(localized))
+    print("freeze_dso_exports: updated {} bindings".format(changed))
     return 0
 
 
