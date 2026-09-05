@@ -17,6 +17,12 @@ default_linker_script = "//kernel/kernel/src/boards/${board}/link.x"
 qemu_exe = "qemu-system-riscv32"
 qemu_machine = "virt"
 rust_abi_target = "riscv32"
+dynamic_profile_id = "riscv32-vivo-blueos-imc"
+dynamic_link_target = "riscv32"
+dynamic_link_options = [
+  "-march=rv32imc",
+  "-mabi=ilp32",
+]
 qemu_extra_args = [
   "-bios",
   "none",

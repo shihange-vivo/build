@@ -85,6 +85,11 @@ blueos_board("qemu_mps3_an547") {
   ]
   check_all = check_all_on_virtual_board + clippy_all_on_virtual_board +
               [ "//apps/example:check_apps" ]
+  # C32-2: the hard-float board runs the same dynamic-linker gates as the
+  # v7-M board — the load profiles are per-board, the tests are shared.
+  check_all += [ "//kernel/tests/dynamic_test:run_dynamic_test" ]
+  check_all += [ "//kernel/tests/dynamic_multidso_test:run_dynamic_multidso_test" ]
+  check_all += [ "//kernel/tests/dynamic_scope_test:run_dynamic_scope_test" ]
 
   # FIXME: Enable thread_metric on this board. Currently, VFS is disabled on
   # this board, so that `printf` in libc is unavailable.  However, thread_metric

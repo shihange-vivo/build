@@ -17,6 +17,15 @@ default_linker_script = "//kernel/kernel/src/boards/${board}/link.x"
 qemu_exe = "qemu-system-riscv64"
 qemu_machine = "virt"
 rust_abi_target = "riscv64"
+dynamic_profile_id = "riscv64-vivo-blueos"
+dynamic_link_target = "riscv64"
+dynamic_link_options = [
+  "-march=rv64imac",
+  "-mabi=lp64",
+]
+# C33 vertical bring-up: embed the RV64 PIE/DSO/package corpus and assemble
+# the application service during boot.
+boot_dynamic_seed = true
 qemu_extra_args = [
   "-bios",
   "none",

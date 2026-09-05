@@ -21,6 +21,7 @@ rust_abi_target = "thumbv8m.main-none-eabihf"
 dynamic_profile_id = "thumbv8m-main-vivo-blueos-newlibeabihf"
 # The clang/LLD --target spelling for dynamic root links (board ABI config).
 dynamic_link_target = "thumbv8m.main-none-eabihf"
+dynamic_link_options = []
 # C32: the hard-float board seeds and launches the dynamic stack like the
 # v7-M board (Phase 2 gate: real hard-float DSOs on Cortex-M55).
 boot_dynamic_seed = true
