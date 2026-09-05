@@ -47,8 +47,8 @@ def main():
     parser.add_argument("--out", required=True)
     parser.add_argument("--blob", action="append", default=[],
                         help="symbol,path pair to embed")
-    parser.add_argument("--layout", default=None,
-                        help="optional package layout JSON (vfs_path/artifact)")
+    parser.add_argument("--layout", action="append", default=[],
+                        help="package layout JSON (vfs_path/artifact, repeatable)")
     args = parser.parse_args()
 
     blobs = []
@@ -59,8 +59,8 @@ def main():
                              f"blob {spec!r}")
         blobs.append((symbol, path))
 
-    if args.layout:
-        with open(args.layout, encoding="utf-8") as handle:
+    for layout_path in args.layout:
+        with open(layout_path, encoding="utf-8") as handle:
             layout = json.load(handle)
         for item in layout:
             vfs_path = item["vfs_path"]

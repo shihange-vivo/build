@@ -57,12 +57,15 @@ template("blueos_app_package") {
   }
   _lib_dir = rebase_path("${root_out_dir}/lib")
 
+  _private_dsos = []
+  if (defined(invoker.private_dsos)) {
+    _private_dsos = invoker.private_dsos
+  }
+
   # --- private DSOs ---------------------------------------------------------
   # blueos_dso emits lib/lib<name>.so for each private DSO.
-  _private_names = []
   if (defined(invoker.private_dsos)) {
-    foreach(_dso, invoker.private_dsos) {
-      _private_names += [ _dso.name ]
+    foreach(_dso, _private_dsos) {
       blueos_dso(_dso.name) {
         crate_name = _dso.name
         soname = _dso.soname
@@ -76,6 +79,9 @@ template("blueos_app_package") {
           rustflags += [ "-Clink-arg=-l:lib${_dep}.so" ]
           deps += [ ":${_dep}" ]
         }
+        if (defined(_dso.rustflags)) {
+          rustflags += _dso.rustflags
+        }
       }
     }
   }
@@ -88,7 +94,7 @@ template("blueos_app_package") {
       "//librs:blueos_scrt1",
       "//librs:libc",
     ]
-    foreach(_dso, invoker.private_dsos) {
+    foreach(_dso, _private_dsos) {
       deps += [ ":${_dso.name}" ]
     }
     if (defined(invoker.extra_root_deps)) {
@@ -104,6 +110,9 @@ template("blueos_app_package") {
     ]
     foreach(_dep, invoker.root_depends) {
       rustflags += [ "-Clink-arg=-l:lib${_dep}.so" ]
+    }
+    if (defined(invoker.root_rustflags)) {
+      rustflags += invoker.root_rustflags
     }
   }
 
@@ -127,7 +136,7 @@ template("blueos_app_package") {
   foreach(_soname, _system_sonames) {
     _manifest_args += [ "--system-soname", _soname ]
   }
-  foreach(_dso, invoker.private_dsos) {
+  foreach(_dso, _private_dsos) {
     _manifest_args += [
       "--private",
       _dso.soname + "," + _dso.vfs_path + "," +
@@ -138,11 +147,11 @@ template("blueos_app_package") {
   action("${_name}_manifest") {
     script = "//build/scripts/gen_blueos_app_manifest.py"
     deps = [ ":${_name}_root" ]
-    foreach(_dso, invoker.private_dsos) {
+    foreach(_dso, _private_dsos) {
       deps += [ ":${_dso.name}" ]
     }
     inputs = [ _root_elf ]
-    foreach(_dso, invoker.private_dsos) {
+    foreach(_dso, _private_dsos) {
       inputs += [ "${root_out_dir}/lib/lib${_dso.name}.so" ]
     }
     args = _manifest_args
@@ -159,7 +168,7 @@ template("blueos_app_package") {
     "--root",
     rebase_path(_root_elf),
   ]
-  foreach(_dso, invoker.private_dsos) {
+  foreach(_dso, _private_dsos) {
     _check_args += [
       "--private",
       _dso.soname + "," + rebase_path("${root_out_dir}/lib/lib${_dso.name}.so"),
@@ -172,14 +181,14 @@ template("blueos_app_package") {
       ":${_name}_manifest",
       ":${_name}_root",
     ]
-    foreach(_dso, invoker.private_dsos) {
+    foreach(_dso, _private_dsos) {
       deps += [ ":${_dso.name}" ]
     }
     inputs = [
       _manifest,
       _root_elf,
     ]
-    foreach(_dso, invoker.private_dsos) {
+    foreach(_dso, _private_dsos) {
       inputs += [ "${root_out_dir}/lib/lib${_dso.name}.so" ]
     }
     args = _check_args
