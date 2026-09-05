@@ -82,5 +82,6 @@ blueos_board("qemu_mps2_an385") {
   check_all += [ "//build/tests/test_kernel_static:kernel_static_demo_check" ]
   check_all += [ "//apps/example/dynamic/hello:hello_check" ]
   check_all += [ "//kernel/tests/dynamic_test:run_dynamic_test" ]
+  check_all += [ "//kernel/tests/dynamic_multidso_test:run_dynamic_multidso_test" ]
   check_all += [ "//librs:libc_check" ]
 }
