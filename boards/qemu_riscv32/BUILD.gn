@@ -51,4 +51,11 @@ blueos_board("qemu_riscv32") {
   default = []
   _check_all = check_all_on_virtual_board + clippy_all_on_virtual_board
   check_all = filter_exclude(_check_all, [ "//kernel/adapter*" ])
+  # C35: the RV32 IMC board produces the dynamic PIE/DSO/package corpus and
+  # runs the same three linker gates as the RV64 board (single-core QEMU).
+  check_all += [ "//apps/example/dynamic/hello:hello_check" ]
+  check_all += [ "//apps/example/dynamic/multi_dso:multi" ]
+  check_all += [ "//kernel/tests/dynamic_test:run_dynamic_test" ]
+  check_all += [ "//kernel/tests/dynamic_multidso_test:run_dynamic_multidso_test" ]
+  check_all += [ "//kernel/tests/dynamic_scope_test:run_dynamic_scope_test" ]
 }

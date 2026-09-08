@@ -23,6 +23,9 @@ dynamic_link_options = [
   "-march=rv32imc",
   "-mabi=ilp32",
 ]
+# C35 vertical bring-up: embed the RV32 IMC PIE/DSO/package corpus and
+# assemble the application service during boot.
+boot_dynamic_seed = true
 qemu_extra_args = [
   "-bios",
   "none",
