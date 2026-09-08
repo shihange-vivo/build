@@ -67,6 +67,7 @@ blueos_board("esp32c6_devkitc_1") {
     "//apps/example/framebuffer:fb_example",
     "//apps/example/slint_ui:slint_ui_example",
     "//apps/example/slint_wifi_scan:slint_wifi_scan_example",
+    "//apps/example/slint_sdcard:slint_sdcard_example",
     "//apps/example/slint_in_fly:slint_in_fly",
   ]
 

@@ -68,6 +68,42 @@ template("cargo_crate") {
   if (defined(invoker.cargo_pkg_name)) {
     _rustenv += [ "CARGO_PKG_NAME=${invoker.cargo_pkg_name}" ]
   }
+
+  _deps = []
+  if (defined(invoker.deps)) {
+    if (current_toolchain != "//build/toolchain:host" &&
+        target_name == "esp_config") {
+      # gnrt currently unions esp-config's normal and host-only `build`
+      # dependencies. Keep the latter out of firmware builds.
+      _deps += filter_exclude(
+              invoker.deps,
+              [
+                "//external/vendor/esp-metadata-generated-0.4.0:esp_metadata_generated",
+                "//external/vendor/serde-1.0.228:serde",
+                "//external/vendor/serde_yaml-0.9.34:serde_yaml",
+                "//external/vendor/somni-expr-0.2.0:somni_expr",
+              ])
+    } else {
+      _deps += invoker.deps
+    }
+  }
+
+  _features = []
+  if (defined(invoker.features)) {
+    if (current_toolchain != "//build/toolchain:host") {
+      # Temporary workaround for gnrt's merged host/target feature set.
+      _host_only_features = [ "std" ]
+      if (target_name == "esp_config") {
+        _host_only_features += [ "build" ]
+      }
+      if (target_name == "esp_metadata_generated") {
+        _host_only_features += [ "build-script" ]
+      }
+      _features += filter_exclude(invoker.features, _host_only_features)
+    } else {
+      _features += invoker.features
+    }
+  }
   if (defined(invoker.cargo_pkg_repository)) {
     _rustenv += [ "CARGO_PKG_REPOSITORY=${invoker.cargo_pkg_repository}" ]
   }
@@ -84,12 +120,17 @@ template("cargo_crate") {
     forward_variables_from(invoker,
                            "*",
                            [
+                             "build_deps",
                              "build_root",
                              "build_sources",
                              "build_script_inputs",
                              "build_script_outputs",
+                             "deps",
+                             "features",
                              "rustenv",
                            ])
+    deps = _deps
+    features = _features
     rustenv = _rustenv
     if (!defined(rustflags)) {
       rustflags = []
