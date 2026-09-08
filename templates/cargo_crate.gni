@@ -39,12 +39,22 @@ template("cargo_crate") {
     _epochlabel = "v${_tempepoch}"
   }
 
+  # Multiple minor versions of one crate may coexist in the dependency graph.
+  # Their host build scripts must not overwrite each other's executables.
+  _versionlabel = _epochlabel
+  if (defined(invoker.cargo_pkg_version)) {
+    _tempversion = string_replace(invoker.cargo_pkg_version, ".", "_")
+    _tempversion = string_replace(_tempversion, "-", "_")
+    _tempversion = string_replace(_tempversion, "+", "_")
+    _versionlabel = "v${_tempversion}"
+  }
+
   # Executables need to have unique names. Work out a prefix.
   if (defined(invoker.build_root)) {
     # This name includes the target name to ensure it's unique for each possible
     # build target in the same BUILD.gn file.
     build_script_name =
-        "${crate_name}_${target_name}_${_epochlabel}_build_script"
+        "${crate_name}_${target_name}_${_versionlabel}_build_script"
   }
 
   _rustenv = []
