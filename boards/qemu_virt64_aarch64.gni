@@ -20,6 +20,9 @@ rust_abi_target = "aarch64-unknown-none"
 dynamic_profile_id = "aarch64-vivo-blueos"
 dynamic_link_target = "aarch64-none-elf"
 dynamic_link_options = []
+# C34 vertical bring-up: embed the AArch64 PIE/DSO/package corpus and assemble
+# the application service during boot.
+boot_dynamic_seed = true
 qemu_extra_args = [
   "-cpu",
   "cortex-a53",

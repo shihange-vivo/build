@@ -48,4 +48,9 @@ blueos_board("qemu_virt64_aarch64") {
   ]
   _check_all = check_all_on_virtual_board + clippy_all_on_virtual_board
   check_all = default + filter_exclude(_check_all, [ "//kernel/adapter*" ])
+  # C34: the AArch64 board produces the dynamic PIE/DSO/package corpus and
+  # gates its ABI contract. The QEMU runtime linker gates are withheld until
+  # the pre-existing AArch64 static-app dispatch (__bk_app_array) is fixed.
+  check_all += [ "//apps/example/dynamic/hello:hello_check" ]
+  check_all += [ "//apps/example/dynamic/multi_dso:multi" ]
 }
