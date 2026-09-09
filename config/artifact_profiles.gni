@@ -58,12 +58,18 @@ dynamic_app_rustflags = [
   "-Clink-arg=-Wl,-z,now",
   "-Clink-arg=-Wl,-z,noexecstack",
   "-Clink-arg=-Wl,-z,text",
+
+  # Embedded dynamic images do not need the ELF linker's 64 KiB default
+  # maximum page size. Keeping PT_LOAD segments 4 KiB-aligned avoids turning
+  # small DSOs into ~192 KiB runtime allocations on SRAM-limited boards.
+  "-Clink-arg=-Wl,-z,max-page-size=4096",
   "-Clink-arg=-Wl,--build-id",
 ]
 
 dso_rustflags = [
   "-Crelocation-model=pic",
   "-Cpanic=abort",
+
   # The bare `-z...`/`--build-id`/`-soname` spellings below require raw
   # rust-lld with GNU argument conventions (`Gnu(Cc::No, Lld::Yes)`). The
   # v7-M target spec defaults to that, but the hard-float v8-M spec still
@@ -78,6 +84,8 @@ dso_rustflags = [
   "-Clink-arg=-znow",
   "-Clink-arg=-znoexecstack",
   "-Clink-arg=-ztext",
+  "-Clink-arg=-zmax-page-size=4096",
+
   # C30 §6: every dynamic artifact records a build-id for the package
   # manifest and the runtime identity check.
   "-Clink-arg=--build-id",
