@@ -26,8 +26,8 @@ import("//build/templates/dynamic_app.gni")
 #   root_path          VFS path of the root ELF
 #   root_sources       root crate sources
 #   root_depends       private DSO target names linked by the root
-#   private_dsos       scopes containing name, soname, vfs_path, sources,
-#                      depends and optional rustflags
+#   private_dsos       scopes containing name, vfs_path, sources, depends,
+#                      optional soname/omit_soname and optional rustflags
 #   extra_root_deps    optional additional build dependencies
 #   root_rustflags     optional additional root link flags
 template("blueos_app_bundle") {
@@ -48,7 +48,12 @@ template("blueos_app_bundle") {
     blueos_dso(_dso.name) {
       target_profile = _profile
       crate_name = _dso.name
-      soname = _dso.soname
+      if (defined(_dso.soname)) {
+        soname = _dso.soname
+      }
+      if (defined(_dso.omit_soname)) {
+        omit_soname = _dso.omit_soname
+      }
       sources = _dso.sources
       deps = [ "//librs:libc" ]
       rustflags = [

@@ -22,10 +22,11 @@ This is the build-time gate for the three artifact link policies introduced in
   * `kernel_static` — PIC codegen, fully static link (ET_EXEC). Forbids an
     interpreter, a dynamic section, DT_NEEDED, text relocations, and any
     relocation that still needs runtime processing.
-  * `dynamic_app` — PIC/PIE dynamic application (ET_DYN). Requires PT_DYNAMIC
-    and a DT_NEEDED dependency; forbids PT_INTERP, `-static`, and `-z norelro`.
-  * `dso` — PIC shared object (ET_DYN). Requires DT_SONAME and forbids an
-    interpreter.
+  * `dynamic_app` — PIC/PIE dynamic application (ET_DYN). Requires PT_DYNAMIC;
+    forbids PT_INTERP, `-static`, and `-z norelro`. A self-contained PIE may
+    have no DT_NEEDED entries.
+  * `dso` — PIC shared object (ET_DYN). DT_SONAME is optional; an interpreter
+    is forbidden.
 
 The artifact policy and target profile are orthogonal. ``--profile`` selects
 kernel/PIE/DSO rules; ``--target-profile`` selects class, machine, ABI flags,
@@ -380,8 +381,6 @@ def _check_dynamic_app(llvm_readelf, elf, target_id):
         raise ElfError("dynamic_app: PT_DYNAMIC missing")
 
     tags = _dynamic_tags(dyn_text)
-    if not tags.get("NEEDED"):
-        raise ElfError("dynamic_app: DT_NEEDED missing (must link libc.so)")
     flags1 = tags.get("FLAGS_1", set())
     if any("STATIC" in f for f in flags1):
         raise ElfError("dynamic_app: linked -static (DF_1_STATIC present)")
@@ -413,8 +412,6 @@ def _check_dso(llvm_readelf, elf, target_id, exports=None):
         raise ElfError("dso: PT_DYNAMIC missing")
 
     tags = _dynamic_tags(dyn_text)
-    if not tags.get("SONAME"):
-        raise ElfError("dso: DT_SONAME missing (must export a soname)")
     _check_dynamic_hardening("dso", phdr_text, tags, note_text)
 
     _check_dynamic_relocs("dso", target_id, _relocs(reloc_text))

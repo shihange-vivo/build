@@ -12,16 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import("//build/config/artifact_profiles.gni")
 import("//build/boards/${board}.gni")
+import("//build/config/artifact_profiles.gni")
 import("//build/templates/rust.gni")
 
-# Build a PIC shared object (ET_DYN, `-shared`) with a SONAME and gate its ELF
-# contract.
+# Build a PIC shared object (ET_DYN, `-shared`) and gate its ELF contract.
 #
 # The DSO is the system shared library (`libc.so.1` in C19). The profile pins
 # PIC codegen and the hardened DSO flags (`-z relro -z now -z noexecstack
-# -z text`); the SONAME is a required contract (see `check_blueos_elf.py`).
+# -z text`). A SONAME is emitted by default; set `omit_soname = true` for a
+# path-addressed DSO that intentionally has none.
 #
 # An optional `exports` manifest (a version-script-style file, C19 §8.2)
 # freezes the dynamic symbol table: a postlink action localizes every
@@ -47,15 +47,28 @@ template("blueos_dso") {
     _crate_name = invoker.crate_name
   }
 
-  _soname = "lib${_crate_name}.so"
-  if (defined(invoker.soname)) {
-    _soname = invoker.soname
-  }
+  _omit_soname = defined(invoker.omit_soname) && invoker.omit_soname
+  assert(!_omit_soname || !defined(invoker.soname),
+         "blueos_dso cannot set both `soname` and `omit_soname`")
 
   build_rust(_name) {
-    forward_variables_from(invoker, "*", [ "rustflags", "export_manifest" ])
+    forward_variables_from(invoker,
+                           "*",
+                           [
+                             "rustflags",
+                             "export_manifest",
+                             "omit_soname",
+                             "soname",
+                           ])
     crate_type = "cdylib"
-    rustflags = dso_rustflags + [ "-Clink-arg=-soname=${_soname}" ]
+    rustflags = dso_rustflags
+    if (!_omit_soname) {
+      _soname = "lib${_crate_name}.so"
+      if (defined(invoker.soname)) {
+        _soname = invoker.soname
+      }
+      rustflags += [ "-Clink-arg=-soname=${_soname}" ]
+    }
     if (defined(invoker.rustflags)) {
       rustflags += invoker.rustflags
     }
