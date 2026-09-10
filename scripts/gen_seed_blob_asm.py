@@ -18,18 +18,16 @@
 
 Each `--blob <symbol>,<path>` pair emits a start/end symbol pair around an
 `.incbin` of the artifact, so the kernel can copy the bytes into the root
-tmpfs at boot (C29, §18.1/18.2). An optional `--layout <json>` (the package
-layout emitted by `gen_blueos_app_manifest.py`) adds every package image
-with a symbol derived from its VFS path — the same naming rule
-`gen_app_package_catalog.py` uses, so the catalog's `image_blob` resolves to
-these symbols. The emitted directives are architecture-neutral; the output is
-assembled with the board kernel config and linked into every kernel image that
-depends on the blueos crate.
+tmpfs at boot (C29, §18.1/18.2). An optional `--layout <json>` adds every app
+bundle image with a symbol derived from its VFS path — the same naming rule
+`gen_boot_seed_catalog.py` uses. The emitted directives are
+architecture-neutral; the output is assembled with the board kernel config
+and linked into every kernel image that depends on the blueos crate.
 
 Usage: gen_seed_blob_asm.py --out <file.S> \
           --blob hello,/abs/path/bin/hello \
           --blob libc,/abs/path/lib/liblibrs.so \
-          [--layout /abs/path/pkg_layout.json]
+          [--layout /abs/path/app_layout.json]
 """
 
 import argparse
@@ -50,7 +48,7 @@ def main():
     parser.add_argument("--blob", action="append", default=[],
                         help="symbol,path pair to embed")
     parser.add_argument("--layout", action="append", default=[],
-                        help="package layout JSON (vfs_path/artifact, repeatable)")
+                        help="app layout JSON (vfs_path/artifact, repeatable)")
     args = parser.parse_args()
 
     blobs = []
