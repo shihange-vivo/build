@@ -69,6 +69,7 @@ blueos_board("esp32c6_devkitc_1") {
     "//apps/example/slint_wifi_scan:slint_wifi_scan_example",
     "//apps/example/slint_sdcard:slint_sdcard_example",
     "//apps/example/slint_in_fly:slint_in_fly",
+    "//apps/example/slint_battery:slint_battery_example",
   ]
 
   # ESP32-C6 has no usable QEMU: upstream QEMU has no esp32c6 machine and the
