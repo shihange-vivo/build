@@ -1,0 +1,110 @@
+# Copyright (c) 2026 vivo Mobile Communication Co., Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("//build/templates/rust.gni")
+
+# Generate a per-image boot application profile provider (§6.2–§6.3).
+#
+# The provider is a tiny no_std rlib that defines exactly one
+# ``__BLUEOS_BOOT_APPLICATION_PROFILE`` symbol.  The kernel's boot path
+# reads it to decide:
+#   - whether to install the embedded ELF seed,
+#   - whether to initialize the dynamic loader runtime,
+#   - how to start the first application (static / dynamic / none).
+#
+# This decouples three orthogonal boot concerns that were previously
+# mashed together by the board-level ``boot_dynamic_seed`` flag.
+#
+# Invoker contract:
+#   application_start           "static" | "dynamic" | "none"
+#   enable_dynamic_loader       bool (default false)
+#   import_embedded_dynamic_elf bool (default false)
+#   dynamic_root_path           string (required when application_start="dynamic")
+#
+# Produces:
+#   :<name>   a build_rust rlib target compiling the generated provider source
+#
+# Configuration-combination assertions run both here (gn gen time) and in
+# the Python generator, so a misconfigured profile fails at generation,
+# not at boot.
+template("blueos_boot_profile") {
+  assert(defined(invoker.application_start), "application_start required")
+  assert(
+      invoker.application_start == "static" ||
+          invoker.application_start == "dynamic" ||
+          invoker.application_start == "none",
+      "application_start must be \"static\", \"dynamic\", or \"none\"")
+
+  _enable_loader = false
+  if (defined(invoker.enable_dynamic_loader) && invoker.enable_dynamic_loader) {
+    _enable_loader = true
+  }
+
+  _import_elf = false
+  if (defined(invoker.import_embedded_dynamic_elf) &&
+      invoker.import_embedded_dynamic_elf) {
+    _import_elf = true
+  }
+
+  _root_path = ""
+  if (defined(invoker.dynamic_root_path)) {
+    _root_path = invoker.dynamic_root_path
+  }
+
+  # §4.3 constraints -------------------------------------------------------
+  if (invoker.application_start == "dynamic") {
+    assert(_enable_loader,
+           "application_start=dynamic requires enable_dynamic_loader=true")
+    assert(_root_path != "",
+           "application_start=dynamic requires dynamic_root_path")
+  }
+  if (_import_elf) {
+    assert(_enable_loader,
+           "import_embedded_dynamic_elf=true requires enable_dynamic_loader=true")
+  }
+
+  _name = target_name
+  _src = "${target_gen_dir}/${_name}_profile.rs"
+
+  action("${_name}_gen") {
+    script = "//build/scripts/gen_blueos_boot_profile.py"
+    args = [
+      "--application-start",
+      invoker.application_start,
+      "--out",
+      rebase_path(_src),
+    ]
+    if (_enable_loader) {
+      args += [ "--enable-dynamic-loader" ]
+    }
+    if (_import_elf) {
+      args += [ "--import-embedded-dynamic-elf" ]
+    }
+    if (_root_path != "") {
+      args += [
+        "--dynamic-root-path",
+        _root_path,
+      ]
+    }
+    outputs = [ _src ]
+  }
+
+  build_rust(_name) {
+    crate_type = "rlib"
+    crate_name = _name
+    sources = [ _src ]
+    deps = [ ":${_name}_gen" ]
+    edition = "2021"
+  }
+}
