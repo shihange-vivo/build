@@ -1,0 +1,143 @@
+# Copyright (c) 2026 vivo Mobile Communication Co., Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("//build/boards/${board}.gni")
+import("//build/config/artifact_profiles.gni")
+import("//build/templates/rust.gni")
+
+# Build a PIC shared object (ET_DYN, `-shared`) and gate its ELF contract.
+#
+# A DSO can serve as a system shared library such as `libc.so.1`. The profile
+# pins PIC codegen and the hardened DSO flags (`-z relro -z now -z noexecstack
+# -z text`). A SONAME is emitted by default; set `omit_soname = true` for a
+# path-addressed DSO that intentionally has none.
+#
+# An optional `exports` manifest (a version-script-style file)
+# freezes the dynamic symbol table: a postlink action localizes every
+# GLOBAL/WEAK dynsym entry not listed in the manifest, and the contract gate
+# then asserts dynsym == manifest. rustc always generates its own version
+# script for cdylibs and rust-lld unions multiple scripts, so a link-time
+# script alone cannot hide rustc's list; the postlink freeze can.
+#
+# Produces:
+# :<name>        the linked `lib/lib<crate_name>.so`
+# :<name>_check  runs the ELF contract gate (after the export freeze)
+template("blueos_dso") {
+  assert(defined(invoker.sources), "blueos_dso requires `sources`")
+
+  _name = target_name
+  _target_profile = dynamic_profile_id
+  if (defined(invoker.target_profile)) {
+    _target_profile = invoker.target_profile
+  }
+
+  _crate_name = _name
+  if (defined(invoker.crate_name)) {
+    _crate_name = invoker.crate_name
+  }
+
+  _omit_soname = defined(invoker.omit_soname) && invoker.omit_soname
+  assert(!_omit_soname || !defined(invoker.soname),
+         "blueos_dso cannot set both `soname` and `omit_soname`")
+
+  build_rust(_name) {
+    forward_variables_from(invoker,
+                           "*",
+                           [
+                             "rustflags",
+                             "export_manifest",
+                             "omit_soname",
+                             "soname",
+                           ])
+    crate_type = "cdylib"
+    rustflags = dso_rustflags
+    if (!_omit_soname) {
+      _soname = "lib${_crate_name}.so"
+      if (defined(invoker.soname)) {
+        _soname = invoker.soname
+      }
+      rustflags += [ "-Clink-arg=-soname=${_soname}" ]
+    }
+    if (defined(invoker.rustflags)) {
+      rustflags += invoker.rustflags
+    }
+  }
+
+  _out_dir = get_label_info(":${_name}", "root_out_dir")
+  _elf = "${_out_dir}/lib/lib${_crate_name}.so"
+
+  if (defined(invoker.export_manifest)) {
+    _frozen = "${_out_dir}/lib/lib${_crate_name}.frozen.so"
+  }
+  _check_deps = [ ":${_name}" ]
+  _check_args = [
+    "--profile",
+    "dso",
+    "--target-profile",
+    _target_profile,
+  ]
+  if (defined(invoker.export_manifest)) {
+    # The contract gate validates the *frozen* artifact, not the raw link.
+    _check_inputs = [ _frozen ]
+    _check_args += [ rebase_path(_frozen) ]
+  } else {
+    _check_inputs = [ _elf ]
+    _check_args += [ rebase_path(_elf) ]
+  }
+  if (defined(invoker.export_manifest)) {
+    _exports = invoker.export_manifest
+
+    action("${_name}_freeze") {
+      forward_variables_from(invoker, [ "testonly" ])
+      script = "//build/scripts/freeze_dso_exports.py"
+      deps = [ ":${_name}" ]
+      inputs = [
+        _elf,
+        _exports,
+      ]
+      args = [
+        "--elf",
+        rebase_path(_elf),
+        "--exports",
+        rebase_path(_exports),
+        "--out",
+        rebase_path(_frozen),
+      ]
+      outputs = [
+        "${target_gen_dir}/${_name}_freeze.stamp",
+        _frozen,
+      ]
+    }
+    _check_deps += [ ":${_name}_freeze" ]
+    _check_inputs += [ _exports ]
+    _check_args += [
+      "--exports",
+      rebase_path(_exports),
+    ]
+  }
+
+  _check_args += [
+    "--stamp",
+    rebase_path("${target_gen_dir}/${_name}_check.stamp"),
+  ]
+
+  action("${_name}_check") {
+    forward_variables_from(invoker, [ "testonly" ])
+    script = "//build/scripts/check_blueos_elf.py"
+    inputs = _check_inputs
+    deps = _check_deps
+    args = _check_args
+    outputs = [ "${target_gen_dir}/${_name}_check.stamp" ]
+  }
+}

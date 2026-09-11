@@ -1,0 +1,47 @@
+# Copyright (c) 2026 vivo Mobile Communication Co., Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+kernel_static_rustflags = [
+  "-Crelocation-model=static",
+  "-Cpanic=abort",
+  "-Clink-arg=-static",
+  "-Clink-arg=--no-pie",
+]
+
+dynamic_app_rustflags = [
+  "-Crelocation-model=pic",
+  "-Cpanic=abort",
+  "-Clink-arg=-Wl,-pie",
+  "-Clink-arg=-Wl,--no-dynamic-linker",
+  "-Clink-arg=-Wl,-z,relro",
+  "-Clink-arg=-Wl,-z,now",
+  "-Clink-arg=-Wl,-z,noexecstack",
+  "-Clink-arg=-Wl,-z,text",
+  "-Clink-arg=-Wl,-z,max-page-size=4096",
+  "-Clink-arg=-Wl,--build-id",
+]
+
+dso_rustflags = [
+  "-Crelocation-model=pic",
+  "-Cpanic=abort",
+  "-Clinker=rust-lld",
+  "-Clinker-flavor=gnu-lld",
+  "-Zunstable-options",
+  "-Clink-arg=-zrelro",
+  "-Clink-arg=-znow",
+  "-Clink-arg=-znoexecstack",
+  "-Clink-arg=-ztext",
+  "-Clink-arg=-zmax-page-size=4096",
+  "-Clink-arg=--build-id",
+]
